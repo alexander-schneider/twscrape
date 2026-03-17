@@ -1,6 +1,7 @@
-
 import pytest
-from twscrape.xclid import get_scripts_list, parse_anim_idx
+from bs4 import BeautifulSoup
+
+from twscrape.xclid import get_scripts_list, load_keys, parse_anim_idx
 
 def test_get_scripts_list_malformed_json():
     # Test case with malformed JSON (unquoted keys)
@@ -47,6 +48,30 @@ def test_get_scripts_list_current_xcom_html():
     assert "https://abs.twimg.com/responsive-web/client-web/ondemand.s.246a373a.js" in scripts
 
 
+def test_get_scripts_list_falls_back_when_legacy_blob_is_unparseable():
+    html = """
+    <html>
+      <head>
+        <script>
+          // Old marker still present in some bundles, but blob is not valid JSON anymore.
+          x = e=>e+"." + {not-valid: no, still-broken: yes}[e]+"a.js";
+        </script>
+        <link rel="preload" as="script" href="https://abs.twimg.com/responsive-web/client-web/vendor.d74f1a3a.js" />
+      </head>
+      <body>
+        <script>
+          window.__SOMETHING__ = {"ondemand.s":"246a373"};
+        </script>
+      </body>
+    </html>
+    """
+
+    scripts = list(get_scripts_list(html))
+
+    assert "https://abs.twimg.com/responsive-web/client-web/vendor.d74f1a3a.js" in scripts
+    assert "https://abs.twimg.com/responsive-web/client-web/ondemand.s.246a373a.js" in scripts
+
+
 @pytest.mark.asyncio
 async def test_parse_anim_idx_current_xcom_html(monkeypatch):
     html = """
@@ -75,3 +100,41 @@ async def test_parse_anim_idx_current_xcom_html(monkeypatch):
     monkeypatch.setattr("twscrape.xclid.get_tw_page_text", fake_get_tw_page_text)
 
     assert await parse_anim_idx(html) == [4, 32, 25, 42]
+
+
+@pytest.mark.asyncio
+async def test_load_keys_uses_raw_html_for_anim_idx(monkeypatch):
+    html = """
+    <html>
+      <head>
+        <meta name="twitter-site-verification" content="QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE=" />
+      </head>
+      <body>
+        <svg id="loading-x-anim-test">
+          <g>
+            <path></path>
+            <path d="M 0 0 C 1 2 3 4 5 6 7 8 9 10 11 12 13 14"></path>
+          </g>
+        </svg>
+        <script>
+          window.__SOMETHING__ = {"ondemand.s":"246a373"};
+        </script>
+      </body>
+    </html>
+    """
+    seen = {}
+
+    async def fake_parse_anim_idx(text: str):
+        seen["text"] = text
+        return [4, 32, 25, 42]
+
+    monkeypatch.setattr("twscrape.xclid.parse_anim_idx", fake_parse_anim_idx)
+    monkeypatch.setattr("twscrape.xclid.parse_vk_bytes", lambda soup: [1] * 64)
+    monkeypatch.setattr("twscrape.xclid.parse_anim_arr", lambda soup, vk_bytes: [[1.0] * 15 for _ in range(16)])
+    monkeypatch.setattr("twscrape.xclid.cacl_anim_key", lambda frame_row, frame_dur: "anim-key")
+
+    vk_bytes, anim_key = await load_keys(html, BeautifulSoup(html, "html.parser"))
+
+    assert seen["text"] == html
+    assert len(vk_bytes) == 64
+    assert anim_key == "anim-key"

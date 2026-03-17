@@ -99,8 +99,11 @@ def get_scripts_list(text: str):
     suffix = '[e]+"a.js"'
     if marker in text and suffix in text:
         scripts = text.split(marker, 1)[1].split(suffix, 1)[0]
-        yield from _parse_legacy_scripts_map(scripts)
-        return
+        try:
+            yield from _parse_legacy_scripts_map(scripts)
+            return
+        except Exception:
+            pass
 
     urls = list(_parse_current_html_scripts(text))
     if urls:
@@ -281,8 +284,8 @@ def parse_anim_arr(soup: bs4.BeautifulSoup, vk_bytes: list[int]) -> list[list[fl
     return arr
 
 
-async def load_keys(soup: bs4.BeautifulSoup) -> tuple[list[int], str]:
-    anim_idx = await parse_anim_idx(str(soup))
+async def load_keys(page_text: str, soup: bs4.BeautifulSoup) -> tuple[list[int], str]:
+    anim_idx = await parse_anim_idx(page_text)
     vk_bytes = parse_vk_bytes(soup)
     anim_arr = parse_anim_arr(soup, vk_bytes)
 
@@ -304,7 +307,7 @@ class XClIdGen:
         text = await get_tw_page_text("https://x.com/tesla", clt=clt)
         soup = bs4.BeautifulSoup(text, "html.parser")
 
-        vk_bytes, anim_key = await load_keys(soup)
+        vk_bytes, anim_key = await load_keys(text, soup)
         clid_gen = XClIdGen(vk_bytes, anim_key)
         return clid_gen
 
@@ -334,7 +337,7 @@ async def main():
     text = await get_tw_page_text("https://x.com/elonmusk")
     soup = bs4.BeautifulSoup(text, "html.parser")
 
-    vk_bytes, anim_key = await load_keys(soup)
+    vk_bytes, anim_key = await load_keys(text, soup)
     clid_gen = XClIdGen(vk_bytes, anim_key)
 
     method = "GET"
