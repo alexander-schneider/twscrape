@@ -46,11 +46,9 @@ def script_url(k: str, v: str):
     return f"https://abs.twimg.com/responsive-web/client-web/{k}.{v}.js"
 
 
-def get_scripts_list(text: str):
-    scripts = text.split('e=>e+"."+')[1].split('[e]+"a.js"')[0]
+def _parse_legacy_scripts_map(scripts: str):
     try:
-        for k, v in json.loads(scripts).items():
-            yield script_url(k, f"{v}a")
+        data = json.loads(scripts)
     except json.decoder.JSONDecodeError as e:
         # Fix unquoted keys like: node_modules_pnpm_ws_8_18_0_node_modules_ws_browser_js
         # Twitter started returning malformed JSON with unquoted keys
@@ -58,12 +56,58 @@ def get_scripts_list(text: str):
             fixed_scripts = re.sub(
                 r'([,\{])(\s*)([\w]+_[\w_]+)(\s*):',
                 r'\1\2"\3"\4:',
-                scripts
+                scripts,
             )
-            for k, v in json.loads(fixed_scripts).items():
-                yield script_url(k, f"{v}a")
+            data = json.loads(fixed_scripts)
         except Exception:
             raise Exception("Failed to parse scripts") from e
+
+    for k, v in data.items():
+        yield script_url(k, f"{v}a")
+
+
+def _normalize_asset_url(url: str) -> str:
+    if url.startswith("//"):
+        return f"https:{url}"
+
+    return url
+
+
+def _parse_current_html_scripts(text: str):
+    soup = bs4.BeautifulSoup(text, "html.parser")
+    seen: set[str] = set()
+
+    for tag in soup.select("script[src], link[as='script'][href]"):
+        url = tag.get("src") or tag.get("href")
+        if not url:
+            continue
+
+        normalized = _normalize_asset_url(str(url))
+        if normalized not in seen:
+            seen.add(normalized)
+            yield normalized
+
+    ondemand_match = re.search(r"""['"]ondemand\.s['"]\s*:\s*['"]([\w]+)['"]""", text)
+    if ondemand_match:
+        normalized = script_url("ondemand.s", f"{ondemand_match.group(1)}a")
+        if normalized not in seen:
+            yield normalized
+
+
+def get_scripts_list(text: str):
+    marker = 'e=>e+"."+'
+    suffix = '[e]+"a.js"'
+    if marker in text and suffix in text:
+        scripts = text.split(marker, 1)[1].split(suffix, 1)[0]
+        yield from _parse_legacy_scripts_map(scripts)
+        return
+
+    urls = list(_parse_current_html_scripts(text))
+    if urls:
+        yield from urls
+        return
+
+    raise Exception("Failed to parse scripts")
 
 
 # MARK: XClientTxId parsing
