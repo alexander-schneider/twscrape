@@ -4,7 +4,7 @@ from typing import Literal
 from httpx import Response
 
 from .accounts_pool import AccountsPool
-from .logger import set_log_level
+from .logger import logger, set_log_level
 from .models import Tweet, User, parse_trends, parse_tweet, parse_tweets, parse_user, parse_users
 from .queue_client import QueueClient
 from .utils import encode_params, find_obj, get_by_path
@@ -110,6 +110,52 @@ class API:
             return cur.get("value")
         return None
 
+    def _get_entries(self, obj: dict) -> list[dict]:
+        entries = get_by_path(obj, "entries") or []
+        return [
+            x
+            for x in entries
+            if not (
+                x["entryId"].startswith("cursor-")
+                or x["entryId"].startswith("messageprompt-")
+            )
+        ]
+
+    def _is_stalled_search_page(
+        self,
+        cursor: str | None,
+        entries: list[dict],
+        seen_cursors: set[str],
+        seen_pages: set[tuple[str, ...]],
+    ) -> bool:
+        if cursor is not None and cursor in seen_cursors:
+            return True
+
+        page_key = tuple(x["entryId"] for x in entries)
+        if page_key and page_key in seen_pages:
+            return True
+
+        if cursor is not None:
+            seen_cursors.add(cursor)
+        if page_key:
+            seen_pages.add(page_key)
+
+        return False
+
+    async def _iter_unique(self, gen, parser, limit=-1):
+        ids = set()
+        async with aclosing(gen) as items:
+            async for rep in items:
+                for item in parser(rep.json(), -1):
+                    if item.id in ids:
+                        continue
+
+                    ids.add(item.id)
+                    yield item
+
+                    if limit > 0 and len(ids) >= limit:
+                        return
+
     # gql helpers
 
     async def _gql_items(
@@ -117,6 +163,8 @@ class API:
     ):
         queue, cur, cnt, active = op.split("/")[-1], None, 0, True
         kv, ft = {**kv}, {**GQL_FEATURES, **(ft or {})}
+        seen_cursors: set[str] = set()
+        seen_pages: set[tuple[str, ...]] = set()
 
         async with QueueClient(self.pool, queue, self.debug, proxy=self.proxy) as client:
             while active:
@@ -133,16 +181,14 @@ class API:
                     return
 
                 obj = rep.json()
-                els = get_by_path(obj, "entries") or []
-                els = [
-                    x
-                    for x in els
-                    if not (
-                        x["entryId"].startswith("cursor-")
-                        or x["entryId"].startswith("messageprompt-")
-                    )
-                ]
+                els = self._get_entries(obj)
                 cur = self._get_cursor(obj, cursor_type)
+
+                if queue == "SearchTimeline" and self._is_stalled_search_page(
+                    cur, els, seen_cursors, seen_pages
+                ):
+                    logger.warning("SearchTimeline pagination stalled, stopping repeated page")
+                    return
 
                 rep, cnt, active = self._is_end(rep, queue, els, cur, cnt, limit)
                 if rep is None:
@@ -173,17 +219,13 @@ class API:
                 yield x
 
     async def search(self, q: str, limit=-1, kv: KV = None):
-        async with aclosing(self.search_raw(q, limit=limit, kv=kv)) as gen:
-            async for rep in gen:
-                for x in parse_tweets(rep.json(), limit):
-                    yield x
+        async for x in self._iter_unique(self.search_raw(q, limit=limit, kv=kv), parse_tweets, limit):
+            yield x
 
     async def search_user(self, q: str, limit=-1, kv: KV = None):
         kv = {"product": "People", **(kv or {})}
-        async with aclosing(self.search_raw(q, limit=limit, kv=kv)) as gen:
-            async for rep in gen:
-                for x in parse_users(rep.json(), limit):
-                    yield x
+        async for x in self._iter_unique(self.search_raw(q, limit=limit, kv=kv), parse_users, limit):
+            yield x
 
     # user_by_id
 
