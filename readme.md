@@ -2,9 +2,6 @@
 
 <div align="center">
 
-[<img src="https://badges.ws/pypi/v/twscrape" alt="version" />](https://pypi.org/project/twscrape)
-[<img src="https://badges.ws/pypi/python/twscrape" alt="py versions" />](https://pypi.org/project/twscrape)
-[<img src="https://badges.ws/pypi/dm/twscrape" alt="downloads" />](https://pypi.org/project/twscrape)
 [<img src="https://badges.ws/github/license/alexander-schneider/twscrape" alt="license" />](https://github.com/alexander-schneider/twscrape/blob/main/LICENSE)
 [<img src="https://badges.ws/badge/-/buy%20me%20a%20coffee/ff813f?icon=buymeacoffee&label" alt="donate" />](https://buymeacoffee.com/vladkens)
 
@@ -12,18 +9,37 @@
 
 Twitter GraphQL API implementation with [SNScrape](https://github.com/JustAnotherArchivist/snscrape) data models.
 
+This repository is an Adanos-maintained fork of the original
+[`vladkens/twscrape`](https://github.com/vladkens/twscrape).
+The original project is still the upstream reference.
+This fork contains local fixes and smoke-test tooling used by Adanos projects.
+
 <div align="center">
   <img src=".github/example.png" alt="example of cli usage" height="400px">
 </div>
 
 ## Install
 
+Do not use:
+
 ```bash
 pip install twscrape
 ```
-Or development version:
+
+That installs the upstream PyPI package and not this fork.
+
+Use this repository directly instead:
+
 ```bash
 pip install git+https://github.com/alexander-schneider/twscrape.git
+```
+
+For local development:
+
+```bash
+git clone https://github.com/alexander-schneider/twscrape.git
+cd twscrape
+pip install -e .[dev]
 ```
 
 ## Local Smoke Test

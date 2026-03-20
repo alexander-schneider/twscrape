@@ -4,7 +4,7 @@ import argparse
 import asyncio
 import getpass
 import os
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from twscrape import API, AccountsPool, set_log_level
@@ -230,7 +230,7 @@ async def run():
 
     query = args.query
     if args.ticker:
-        since = datetime.now(UTC) - timedelta(hours=args.hours_back)
+        since = datetime.now(timezone.utc) - timedelta(hours=args.hours_back)
         query = build_stock_cashtag_query(
             args.ticker,
             since,

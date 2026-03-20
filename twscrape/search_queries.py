@@ -1,4 +1,4 @@
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 
 def build_stock_cashtag_query(
@@ -15,16 +15,16 @@ def build_stock_cashtag_query(
         raise ValueError("ticker must not be empty")
 
     if since.tzinfo is None:
-        since = since.replace(tzinfo=UTC)
+        since = since.replace(tzinfo=timezone.utc)
     else:
-        since = since.astimezone(UTC)
+        since = since.astimezone(timezone.utc)
 
     if until is None:
-        until = datetime.now(UTC) + timedelta(days=1)
+        until = datetime.now(timezone.utc) + timedelta(days=1)
     elif until.tzinfo is None:
-        until = until.replace(tzinfo=UTC)
+        until = until.replace(tzinfo=timezone.utc)
     else:
-        until = until.astimezone(UTC)
+        until = until.astimezone(timezone.utc)
 
     parts = [
         f"${ticker}",
