@@ -258,17 +258,19 @@ def parse_vk_bytes(soup: bs4.BeautifulSoup) -> list[int]:
 
 async def parse_anim_idx(text: str) -> list[int]:
     scripts = list(get_scripts_list(text))
-    scripts = [x for x in scripts if "/ondemand.s." in x]
+    preferred_scripts = [x for x in scripts if "/ondemand.s." in x]
+    fallback_scripts = [x for x in scripts if x not in preferred_scripts]
+    scripts = preferred_scripts + fallback_scripts
     if not scripts:
         raise Exception("Couldn't get XClientTxId scripts")
 
-    text = await get_tw_page_text(scripts[0])
+    for script_url in scripts:
+        text = await get_tw_page_text(script_url)
+        items = [int(x.group(2)) for x in INDICES_REGEX.finditer(text)]
+        if items:
+            return items
 
-    items = [int(x.group(2)) for x in INDICES_REGEX.finditer(text)]
-    if not items:
-        raise Exception("Couldn't get XClientTxId indices")
-
-    return items
+    raise Exception("Couldn't get XClientTxId indices")
 
 
 def parse_anim_arr(soup: bs4.BeautifulSoup, vk_bytes: list[int]) -> list[list[float]]:

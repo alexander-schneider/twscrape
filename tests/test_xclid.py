@@ -103,6 +103,29 @@ async def test_parse_anim_idx_current_xcom_html(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_parse_anim_idx_falls_back_to_main_bundle_when_ondemand_missing(monkeypatch):
+    html = """
+    <html>
+      <head>
+        <script src="https://abs.twimg.com/responsive-web/client-web/vendor.f1dc7e4a.js"></script>
+        <script src="https://abs.twimg.com/responsive-web/client-web/main.29dcc91a.js"></script>
+      </head>
+    </html>
+    """
+    bundles = {
+        "https://abs.twimg.com/responsive-web/client-web/vendor.f1dc7e4a.js": "window.vendor = true",
+        "https://abs.twimg.com/responsive-web/client-web/main.29dcc91a.js": "function tid(){return (h[7],16)}",
+    }
+
+    async def fake_get_tw_page_text(url: str, clt=None):
+        return bundles[url]
+
+    monkeypatch.setattr("twscrape.xclid.get_tw_page_text", fake_get_tw_page_text)
+
+    assert await parse_anim_idx(html) == [7]
+
+
+@pytest.mark.asyncio
 async def test_load_keys_uses_raw_html_for_anim_idx(monkeypatch):
     html = """
     <html>
