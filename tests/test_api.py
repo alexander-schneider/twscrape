@@ -128,7 +128,11 @@ async def test_gql_items_stops_on_repeated_search_page(api_mock: API, monkeypatc
             return None
 
         async def get(self, url, params=None):
-            calls.append((url, params))
+            calls.append(("get", url, params))
+            raise AssertionError("SearchTimeline should use POST")
+
+        async def post(self, url, json=None):
+            calls.append(("post", url, json))
             if not pages:
                 raise AssertionError("unexpected extra pagination request")
             return pages.pop(0)
@@ -144,6 +148,7 @@ async def test_gql_items_stops_on_repeated_search_page(api_mock: API, monkeypatc
 
     assert len(reps) == 1
     assert len(calls) == 2
+    assert all(x[0] == "post" for x in calls)
 
 
 async def test_search_deduplicates_across_pages(api_mock: API, monkeypatch):

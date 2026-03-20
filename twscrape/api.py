@@ -10,21 +10,21 @@ from .queue_client import QueueClient
 from .utils import encode_params, find_obj, get_by_path
 
 # OP_{NAME} – {NAME} should be same as second part of GQL ID (required to auto-update script)
-OP_SearchTimeline = "AIdc203rPpK_k_2KWSdm7g/SearchTimeline"
-OP_UserByRestId = "WJ7rCtezBVT6nk6VM5R8Bw/UserByRestId"
-OP_UserByScreenName = "1VOOyvKkiI3FMmkeDNxM9A/UserByScreenName"
-OP_TweetDetail = "_8aYOgEDz35BrBcBal1-_w/TweetDetail"
-OP_Followers = "Elc_-qTARceHpztqhI9PQA/Followers"
-OP_Following = "C1qZ6bs-L3oc_TKSZyxkXQ/Following"
+OP_SearchTimeline = "rkp6b4vtR9u7v3naGoOzUQ/SearchTimeline"
+OP_UserByRestId = "VQfQ9wwYdk6j_u2O4vt64Q/UserByRestId"
+OP_UserByScreenName = "IGgvgiOx4QZndDHuD3x9TQ/UserByScreenName"
+OP_TweetDetail = "xIYgDwjboktoFeXe_fgacw/TweetDetail"
+OP_Followers = "Enf9DNUZYiT037aersI5gg/Followers"
+OP_Following = "ntIPnH1WMBKW--4Tn1q71A/Following"
 OP_Retweeters = "i-CI8t2pJD15euZJErEDrg/Retweeters"
-OP_UserTweets = "HeWHY26ItCfUmm1e6ITjeA/UserTweets"
-OP_UserTweetsAndReplies = "OAx9yEcW3JA9bPo63pcYlA/UserTweetsAndReplies"
-OP_ListLatestTweetsTimeline = "BkauSnPUDQTeeJsxq17opA/ListLatestTweetsTimeline"
-OP_BlueVerifiedFollowers = "ZpmVpf_fBIUgdPErpq2wWg/BlueVerifiedFollowers"
-OP_UserCreatorSubscriptions = "7qcGrVKpcooih_VvJLA1ng/UserCreatorSubscriptions"
-OP_UserMedia = "vFPc2LVIu7so2uA_gHQAdg/UserMedia"
+OP_UserTweets = "O0epvwaQPUx-bT9YlqlL6w/UserTweets"
+OP_UserTweetsAndReplies = "zedqO5hg41Ox6UeAKsWWzA/UserTweetsAndReplies"
+OP_ListLatestTweetsTimeline = "fb_6wmHD2dk9D-xYXOQlgw/ListLatestTweetsTimeline"
+OP_BlueVerifiedFollowers = "4zBtcnE_c0v8wn1Zx0yF5Q/BlueVerifiedFollowers"
+OP_UserCreatorSubscriptions = "Xe0o9ZDBW6UjJTfFn0pdLQ/UserCreatorSubscriptions"
+OP_UserMedia = "U1Zgdsu2qjBi8JF74lTmJQ/UserMedia"
 OP_Bookmarks = "-LGfdImKeQz0xS_jjUwzlA/Bookmarks"
-OP_GenericTimelineById = "CT0YFEFf5GOYa5DJcxM91w/GenericTimelineById"
+OP_GenericTimelineById = "IXBKaPnXncdeAOoCEgco4A/GenericTimelineById"
 
 GQL_URL = "https://x.com/i/api/graphql"
 GQL_FEATURES = {  # search values here (view source) https://x.com/
@@ -176,7 +176,10 @@ class API:
                 if queue in ("UserMedia",):
                     params["fieldToggles"] = {"withArticlePlainText": False}
 
-                rep = await client.get(f"{GQL_URL}/{op}", params=encode_params(params))
+                if queue == "SearchTimeline":
+                    rep = await client.post(f"{GQL_URL}/{op}", json=params)
+                else:
+                    rep = await client.get(f"{GQL_URL}/{op}", params=encode_params(params))
                 if rep is None:
                     return
 

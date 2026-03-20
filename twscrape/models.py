@@ -90,11 +90,14 @@ class UserRef(JSONTrait):
 
     @staticmethod
     def parse(obj: dict):
+        id_str = str(obj.get("rest_id") or obj.get("id_str") or obj["id"])
+        username = obj.get("screen_name") or get_or(obj, "core.screen_name")
+        displayname = obj.get("name") or get_or(obj, "core.name")
         return UserRef(
-            id=int(obj["id_str"]),
-            id_str=obj["id_str"],
-            username=obj["screen_name"],
-            displayname=obj["name"],
+            id=int(id_str),
+            id_str=id_str,
+            username=username,
+            displayname=displayname,
         )
 
 
@@ -130,29 +133,57 @@ class User(JSONTrait):
 
     @staticmethod
     def parse(obj: dict, res=None):
+        legacy = obj.get("legacy") or {}
+        core = obj.get("core") or {}
+        profile_bio = obj.get("profile_bio") or {}
+        location = obj.get("location") or {}
+        privacy = obj.get("privacy") or {}
+        avatar = obj.get("avatar") or {}
+        verification = obj.get("verification") or {}
+
+        id_str = str(obj.get("rest_id") or obj.get("id_str") or obj["id"])
+        username = obj.get("screen_name") or core.get("screen_name")
+        displayname = obj.get("name") or core.get("name")
+        created_at = obj.get("created_at") or core.get("created_at")
+        description = obj.get("description") or legacy.get("description") or profile_bio.get("description", "")
+        entities = obj.get("entities") or legacy.get("entities") or {}
+        profile_image_url = obj.get("profile_image_url_https") or avatar.get("image_url")
+        profile_banner_url = obj.get("profile_banner_url") or legacy.get("profile_banner_url")
+        protected = obj.get("protected")
+        if protected is None:
+            protected = privacy.get("protected")
+        verified = obj.get("verified")
+        if verified is None:
+            verified = verification.get("verified")
+        location_name = obj.get("location")
+        if isinstance(location_name, dict):
+            location_name = location_name.get("location", "")
+        if location_name in (None, ""):
+            location_name = location.get("location", "")
+
         return User(
-            id=int(obj["id_str"]),
-            id_str=obj["id_str"],
-            url=f"https://x.com/{obj['screen_name']}",
-            username=obj["screen_name"],
-            displayname=obj["name"],
-            rawDescription=obj["description"],
-            created=email.utils.parsedate_to_datetime(obj["created_at"]),
-            followersCount=obj["followers_count"],
-            friendsCount=obj["friends_count"],
-            statusesCount=obj["statuses_count"],
-            favouritesCount=obj["favourites_count"],
-            listedCount=obj["listed_count"],
-            mediaCount=obj["media_count"],
-            location=obj["location"],
-            profileImageUrl=obj["profile_image_url_https"],
-            profileBannerUrl=obj.get("profile_banner_url"),
-            verified=obj.get("verified"),
+            id=int(id_str),
+            id_str=id_str,
+            url=f"https://x.com/{username}",
+            username=username,
+            displayname=displayname,
+            rawDescription=description,
+            created=email.utils.parsedate_to_datetime(created_at),
+            followersCount=obj.get("followers_count", legacy.get("followers_count", 0)),
+            friendsCount=obj.get("friends_count", legacy.get("friends_count", 0)),
+            statusesCount=obj.get("statuses_count", legacy.get("statuses_count", 0)),
+            favouritesCount=obj.get("favourites_count", legacy.get("favourites_count", 0)),
+            listedCount=obj.get("listed_count", legacy.get("listed_count", 0)),
+            mediaCount=obj.get("media_count", legacy.get("media_count", 0)),
+            location=location_name,
+            profileImageUrl=profile_image_url,
+            profileBannerUrl=profile_banner_url,
+            verified=verified,
             blue=obj.get("is_blue_verified"),
             blueType=obj.get("verified_type"),
-            protected=obj.get("protected"),
-            descriptionLinks=_parse_links(obj, ["entities.description.urls", "entities.url.urls"]),
-            pinnedIds=[int(x) for x in obj.get("pinned_tweet_ids_str", [])],
+            protected=protected,
+            descriptionLinks=_parse_links({"entities": entities}, ["entities.description.urls", "entities.url.urls"]),
+            pinnedIds=[int(x) for x in obj.get("pinned_tweet_ids_str", legacy.get("pinned_tweet_ids_str", []))],
         )
 
 

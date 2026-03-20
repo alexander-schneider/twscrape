@@ -54,7 +54,13 @@ class Ctx:
     async def aclose(self):
         await self.clt.aclose()
 
-    async def req(self, method: str, url: str, params: ReqParams = None) -> Response:
+    async def req(
+        self,
+        method: str,
+        url: str,
+        params: ReqParams = None,
+        json: Any = None,
+    ) -> Response:
         # if code 404 on first try then generate new x-client-transaction-id and retry
         # https://github.com/vladkens/twscrape/issues/248
         path = urlparse(url).path or "/"
@@ -63,7 +69,7 @@ class Ctx:
         while tries < 3:
             gen = await XClIdGenStore.get(self.acc.username, fresh=tries > 0)
             hdr = {"x-client-transaction-id": gen.calc(method, path)}
-            rep = await self.clt.request(method, url, params=params, headers=hdr)
+            rep = await self.clt.request(method, url, params=params, json=json, headers=hdr)
             if rep.status_code != 404:
                 return rep
 
@@ -249,7 +255,16 @@ class QueueClient:
     async def get(self, url: str, params: ReqParams = None) -> Response | None:
         return await self.req("GET", url, params=params)
 
-    async def req(self, method: str, url: str, params: ReqParams = None) -> Response | None:
+    async def post(self, url: str, json: Any = None) -> Response | None:
+        return await self.req("POST", url, json=json)
+
+    async def req(
+        self,
+        method: str,
+        url: str,
+        params: ReqParams = None,
+        json: Any = None,
+    ) -> Response | None:
         unknown_retry, connection_retry = 0, 0
 
         while True:
@@ -258,7 +273,7 @@ class QueueClient:
                 return None
 
             try:
-                rep = await ctx.req(method, url, params=params)
+                rep = await ctx.req(method, url, params=params, json=json)
                 setattr(rep, "__username", ctx.acc.username)
                 await self._check_rep(rep)
 

@@ -235,6 +235,67 @@ async def test_user_by_login():
     assert str(doc.id) in txt
 
 
+async def test_user_parse_current_shape():
+    doc = User.parse(
+        {
+            "__typename": "User",
+            "id": 2030572972407435264,
+            "rest_id": "2030572972407435264",
+            "is_blue_verified": False,
+            "core": {
+                "created_at": "Sun Mar 08 09:14:58 +0000 2026",
+                "name": "Shauna Fatora",
+                "screen_name": "SFatora73036",
+            },
+            "avatar": {
+                "image_url": "https://pbs.twimg.com/profile_images/2030572993135435777/N5cWNSt4_normal.jpg"
+            },
+            "legacy": {
+                "description": "",
+                "entities": {"description": {"urls": []}},
+                "followers_count": 0,
+                "friends_count": 2,
+                "statuses_count": 5,
+                "favourites_count": 0,
+                "listed_count": 0,
+                "media_count": 5,
+                "pinned_tweet_ids_str": [],
+            },
+            "location": {"location": ""},
+            "privacy": {"protected": False},
+            "profile_bio": {"description": ""},
+            "verification": {"verified": False},
+        }
+    )
+
+    assert doc.username == "SFatora73036"
+    assert doc.displayname == "Shauna Fatora"
+    assert doc.id == 2030572972407435264
+    assert doc.id_str == "2030572972407435264"
+    assert doc.url == "https://x.com/SFatora73036"
+    check_user(doc)
+
+
+async def test_user_ref_parse_current_shape():
+    doc = UserRef.parse(
+        {
+            "__typename": "User",
+            "id": 2397143521,
+            "rest_id": "2397143521",
+            "core": {
+                "name": "Dalton Brewer",
+                "screen_name": "daltonbrewer",
+            },
+        }
+    )
+
+    assert doc.id == 2397143521
+    assert doc.id_str == "2397143521"
+    assert doc.username == "daltonbrewer"
+    assert doc.displayname == "Dalton Brewer"
+    check_user_ref(doc)
+
+
 async def test_tweet_details():
     api = get_api()
     mock_rep(api.tweet_details_raw, "raw_tweet_details")
