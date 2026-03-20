@@ -3,24 +3,33 @@ from bs4 import BeautifulSoup
 
 from twscrape.xclid import get_scripts_list, load_keys, parse_anim_idx
 
+
 def test_get_scripts_list_malformed_json():
     # Test case with malformed JSON (unquoted keys)
-    malformed_text_content = 'node_modules_pnpm_ws_8_18_0_node_modules_ws_browser_js:"12345",other_key:"67890"'
-    malformed_text = 'stuff... e=>e+"."+' + '{' + malformed_text_content + '}' + '[e]+"a.js"... stuff'
-    
+    malformed_text_content = (
+        'node_modules_pnpm_ws_8_18_0_node_modules_ws_browser_js:"12345",other_key:"67890"'
+    )
+    malformed_text = (
+        'stuff... e=>e+"."+' + "{" + malformed_text_content + "}" + '[e]+"a.js"... stuff'
+    )
+
     scripts = list(get_scripts_list(malformed_text))
-    
+
     assert len(scripts) == 2
-    assert "https://abs.twimg.com/responsive-web/client-web/node_modules_pnpm_ws_8_18_0_node_modules_ws_browser_js.12345a.js" in scripts
+    assert (
+        "https://abs.twimg.com/responsive-web/client-web/node_modules_pnpm_ws_8_18_0_node_modules_ws_browser_js.12345a.js"
+        in scripts
+    )
     assert "https://abs.twimg.com/responsive-web/client-web/other_key.67890a.js" in scripts
+
 
 def test_get_scripts_list_normal_json():
     # Test case with normal JSON (quoted keys)
     normal_text_content = '"normal_key":"12345","another_key":"67890"'
-    normal_text = 'stuff... e=>e+"."+' + '{' + normal_text_content + '}' + '[e]+"a.js"... stuff'
-    
+    normal_text = 'stuff... e=>e+"."+' + "{" + normal_text_content + "}" + '[e]+"a.js"... stuff'
+
     scripts = list(get_scripts_list(normal_text))
-    
+
     assert len(scripts) == 2
     assert "https://abs.twimg.com/responsive-web/client-web/normal_key.12345a.js" in scripts
     assert "https://abs.twimg.com/responsive-web/client-web/another_key.67890a.js" in scripts
@@ -153,7 +162,9 @@ async def test_load_keys_uses_raw_html_for_anim_idx(monkeypatch):
 
     monkeypatch.setattr("twscrape.xclid.parse_anim_idx", fake_parse_anim_idx)
     monkeypatch.setattr("twscrape.xclid.parse_vk_bytes", lambda soup: [1] * 64)
-    monkeypatch.setattr("twscrape.xclid.parse_anim_arr", lambda soup, vk_bytes: [[1.0] * 15 for _ in range(16)])
+    monkeypatch.setattr(
+        "twscrape.xclid.parse_anim_arr", lambda soup, vk_bytes: [[1.0] * 15 for _ in range(16)]
+    )
     monkeypatch.setattr("twscrape.xclid.cacl_anim_key", lambda frame_row, frame_dur: "anim-key")
 
     vk_bytes, anim_key = await load_keys(html, BeautifulSoup(html, "html.parser"))

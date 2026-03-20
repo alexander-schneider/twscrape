@@ -116,8 +116,7 @@ class API:
             x
             for x in entries
             if not (
-                x["entryId"].startswith("cursor-")
-                or x["entryId"].startswith("messageprompt-")
+                x["entryId"].startswith("cursor-") or x["entryId"].startswith("messageprompt-")
             )
         ]
 
@@ -222,12 +221,16 @@ class API:
                 yield x
 
     async def search(self, q: str, limit=-1, kv: KV = None):
-        async for x in self._iter_unique(self.search_raw(q, limit=limit, kv=kv), parse_tweets, limit):
+        async for x in self._iter_unique(
+            self.search_raw(q, limit=limit, kv=kv), parse_tweets, limit
+        ):
             yield x
 
     async def search_user(self, q: str, limit=-1, kv: KV = None):
         kv = {"product": "People", **(kv or {})}
-        async for x in self._iter_unique(self.search_raw(q, limit=limit, kv=kv), parse_users, limit):
+        async for x in self._iter_unique(
+            self.search_raw(q, limit=limit, kv=kv), parse_users, limit
+        ):
             yield x
 
     # user_by_id

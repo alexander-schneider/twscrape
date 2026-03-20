@@ -145,7 +145,11 @@ class User(JSONTrait):
         username = obj.get("screen_name") or core.get("screen_name") or ""
         displayname = obj.get("name") or core.get("name") or ""
         created_at = obj.get("created_at") or core.get("created_at")
-        description = obj.get("description") or legacy.get("description") or profile_bio.get("description", "")
+        description = (
+            obj.get("description")
+            or legacy.get("description")
+            or profile_bio.get("description", "")
+        )
         entities = obj.get("entities") or legacy.get("entities") or {}
         profile_image_url = obj.get("profile_image_url_https") or avatar.get("image_url") or ""
         profile_banner_url = obj.get("profile_banner_url") or legacy.get("profile_banner_url")
@@ -182,8 +186,13 @@ class User(JSONTrait):
             blue=obj.get("is_blue_verified"),
             blueType=obj.get("verified_type"),
             protected=protected,
-            descriptionLinks=_parse_links({"entities": entities}, ["entities.description.urls", "entities.url.urls"]),
-            pinnedIds=[int(x) for x in obj.get("pinned_tweet_ids_str", legacy.get("pinned_tweet_ids_str", []))],
+            descriptionLinks=_parse_links(
+                {"entities": entities}, ["entities.description.urls", "entities.url.urls"]
+            ),
+            pinnedIds=[
+                int(x)
+                for x in obj.get("pinned_tweet_ids_str", legacy.get("pinned_tweet_ids_str", []))
+            ],
         )
 
 

@@ -1,25 +1,46 @@
+PYTHON ?= python3
+TICKER ?= NVDA
+HOURS ?= 24
+MIN_FAVES ?= 2
+LIMIT ?= 5
+
 check:
 	@make lint
 	@make test
 
 install:
 	pip install -e .[dev]
-	python -m build
+	$(PYTHON) -m build
 
 build:
-	python -m build --sdist --wheel --outdir dist/ .
+	$(PYTHON) -m build --sdist --wheel --outdir dist/ .
 
 lint:
-	@python -m ruff check --select I --fix .
-	@python -m ruff format .
-	@python -m ruff check .
-	@python -m pyright .
+	@$(PYTHON) -m ruff check --select I --fix .
+	@$(PYTHON) -m ruff format .
+	@$(PYTHON) -m ruff check .
+	@$(PYTHON) -m pyright .
 
 test:
-	@python -m pytest -s --cov=twscrape tests/
+	@$(PYTHON) -m pytest -s --cov=twscrape tests/
+
+smoke:
+	@$(PYTHON) examples/local_smoke_test.py
+
+smoke-reset:
+	@$(PYTHON) examples/local_smoke_test.py --reset-db
+
+smoke-prompt:
+	@$(PYTHON) examples/local_smoke_test.py --reset-db --prompt-cookies
+
+smoke-stock:
+	@$(PYTHON) examples/local_smoke_test.py --ticker "$(TICKER)" --hours-back $(HOURS) --min-faves $(MIN_FAVES) --limit $(LIMIT)
+
+smoke-stock-prompt:
+	@$(PYTHON) examples/local_smoke_test.py --reset-db --prompt-cookies --ticker "$(TICKER)" --hours-back $(HOURS) --min-faves $(MIN_FAVES) --limit $(LIMIT)
 
 test-cov:
-	@python -m pytest -s --cov=twscrape tests/
+	@$(PYTHON) -m pytest -s --cov=twscrape tests/
 	@coverage html
 	@open htmlcov/index.html
 

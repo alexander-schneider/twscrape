@@ -54,7 +54,7 @@ def _parse_legacy_scripts_map(scripts: str):
         # Twitter started returning malformed JSON with unquoted keys
         try:
             fixed_scripts = re.sub(
-                r'([,\{])(\s*)([\w]+_[\w_]+)(\s*):',
+                r"([,\{])(\s*)([\w]+_[\w_]+)(\s*):",
                 r'\1\2"\3"\4:',
                 scripts,
             )

@@ -5,7 +5,7 @@
 [<img src="https://badges.ws/pypi/v/twscrape" alt="version" />](https://pypi.org/project/twscrape)
 [<img src="https://badges.ws/pypi/python/twscrape" alt="py versions" />](https://pypi.org/project/twscrape)
 [<img src="https://badges.ws/pypi/dm/twscrape" alt="downloads" />](https://pypi.org/project/twscrape)
-[<img src="https://badges.ws/github/license/vladkens/twscrape" alt="license" />](https://github.com/vladkens/twscrape/blob/main/LICENSE)
+[<img src="https://badges.ws/github/license/alexander-schneider/twscrape" alt="license" />](https://github.com/alexander-schneider/twscrape/blob/main/LICENSE)
 [<img src="https://badges.ws/badge/-/buy%20me%20a%20coffee/ff813f?icon=buymeacoffee&label" alt="donate" />](https://buymeacoffee.com/vladkens)
 
 </div>
@@ -23,8 +23,92 @@ pip install twscrape
 ```
 Or development version:
 ```bash
-pip install git+https://github.com/vladkens/twscrape.git
+pip install git+https://github.com/alexander-schneider/twscrape.git
 ```
+
+## Local Smoke Test
+
+For local development, split the checks into two layers:
+
+1. Offline regression tests
+
+```bash
+pip install -e .[dev]
+make test
+```
+
+2. Live smoke test against X with a cookie-authenticated account
+
+Cookie auth is the most reliable local path. Login flows through username/password/email are much more fragile because X can change challenges, require email confirmation, or trip IP-based checks.
+
+```bash
+TWS_USERNAME="your_account" \
+TWS_COOKIES='auth_token=...; ct0=...' \
+make smoke-reset
+```
+
+This uses a separate SQLite DB at `.local/smoke.db`, prepares one account, then checks:
+
+- `user_by_login(xdevelopers)`
+- `search("from:xdevelopers")`
+
+If you do not want cookies in shell history, use the hidden prompt mode:
+
+```bash
+make smoke-prompt
+```
+
+After the first successful setup, rerun the live check with the stored local session:
+
+```bash
+make smoke
+```
+
+For the stock/cashtag search pattern used in `Reddit-Sentiment`, run:
+
+```bash
+make smoke-stock TICKER=NVDA
+```
+
+That builds the same style of query used there:
+
+```text
+$NVDA min_faves:2 lang:en until:YYYY-MM-DD since:YYYY-MM-DD -filter:links
+```
+
+You can change the search window and threshold:
+
+```bash
+make smoke-stock TICKER=TSLA HOURS=12 MIN_FAVES=5 LIMIT=10
+```
+
+For first-time setup without exposing cookies in shell history:
+
+```bash
+make smoke-stock-prompt TICKER=NVDA
+```
+
+You can customize the probe:
+
+```bash
+python examples/local_smoke_test.py \
+  --reset-db \
+  --username "your_account" \
+  --cookies 'auth_token=...; ct0=...' \
+  --probe-user "OpenAI" \
+  --query "from:OpenAI" \
+  --limit 3
+```
+
+If you need a proxy, pass `--proxy ...` or set `TWS_PROXY`.
+
+Password login is supported for local debugging, but should be treated as fallback only:
+
+```bash
+python examples/local_smoke_test.py --reset-db --login --manual-login
+```
+
+The script will prompt for credentials and, if needed, for the email verification code. Sessions are stored only in `.local/smoke.db`, which is ignored by Git.
 
 ## Features
 - Support both Search & GraphQL Twitter API
@@ -292,7 +376,7 @@ api = API(proxy=proxy)
 doc = await api.user_by_login("elonmusk")
 ```
 
-3. Use can set proxy with environemt variable `TWS_RPOXY`:
+3. You can set a proxy with environment variable `TWS_PROXY`:
 
 ```sh
 TWS_PROXY=socks5://user:pass@127.0.0.1:1080 twscrape user_by_login elonmusk
@@ -335,7 +419,7 @@ API data limitations:
 
 ## Articles
 - [How to still scrape millions of tweets in 2023](https://medium.com/@vladkens/how-to-still-scrape-millions-of-tweets-in-2023-using-twscrape-97f5d3881434)
-- [_(Add Article)_](https://github.com/vladkens/twscrape/edit/main/readme.md)
+- [_(Add Article)_](https://github.com/alexander-schneider/twscrape/edit/main/readme.md)
 
 ## See also
 - [twitter-advanced-search](https://github.com/igorbrigadir/twitter-advanced-search) – guide on search filters
