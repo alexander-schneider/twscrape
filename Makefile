@@ -3,10 +3,12 @@ TICKER ?= NVDA
 HOURS ?= 24
 MIN_FAVES ?= 2
 LIMIT ?= 5
+LIVE_DB ?= $(HOME)/.local/share/twscrape/live-check.db
 
 check:
 	@make lint
 	@make test
+	@make test-live
 
 install:
 	pip install -e .[dev]
@@ -22,7 +24,16 @@ lint:
 	@$(PYTHON) -m pyright .
 
 test:
-	@$(PYTHON) -m pytest -s --cov=twscrape tests/
+	@$(PYTHON) -m pytest -s --cov=twscrape -m "not live" tests/
+
+test-live:
+	@TWS_REQUIRE_LIVE=1 TWS_LIVE_DB="$(LIVE_DB)" $(PYTHON) -m pytest -s -m live tests/
+
+test-live-seed:
+	@$(PYTHON) examples/local_smoke_test.py --db "$(LIVE_DB)" --reset-db
+
+test-live-seed-prompt:
+	@$(PYTHON) examples/local_smoke_test.py --db "$(LIVE_DB)" --reset-db --prompt-cookies
 
 smoke:
 	@$(PYTHON) examples/local_smoke_test.py

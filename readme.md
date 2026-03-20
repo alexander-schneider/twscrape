@@ -53,7 +53,43 @@ pip install -e .[dev]
 make test
 ```
 
-2. Live smoke test against X with a cookie-authenticated account
+2. Live search verification against X with a cookie-authenticated account
+
+This is the important end-to-end check for Adanos usage. It uses a real account
+and verifies that X search still returns tweets.
+
+```bash
+TWS_USERNAME="your_account" \
+TWS_COOKIES='auth_token=...; ct0=...' \
+make test-live
+```
+
+By default the live test uses the Reddit-Sentiment style cashtag query builder
+with a recent ticker window (`NVDA`, `24h`, `min_faves:2`). You can override the
+probe with environment variables such as `TWS_LIVE_TICKER`, `TWS_LIVE_LIMIT`, or
+`TWS_LIVE_QUERY`.
+
+To make this work reliably from Codex automations or other separate worktrees,
+seed a shared local session DB once:
+
+```bash
+make test-live-seed-prompt
+```
+
+This stores the authenticated session at
+`~/.local/share/twscrape/live-check.db`, outside the Git worktree.
+After that, `make test-live` and `make check` can reuse the same local account
+without passing cookies every time.
+
+For a full local verification pass, run:
+
+```bash
+TWS_USERNAME="your_account" \
+TWS_COOKIES='auth_token=...; ct0=...' \
+make check
+```
+
+3. Manual smoke test against X with a cookie-authenticated account
 
 Cookie auth is the most reliable local path. Login flows through username/password/email are much more fragile because X can change challenges, require email confirmation, or trip IP-based checks.
 
