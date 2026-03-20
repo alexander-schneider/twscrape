@@ -1,4 +1,5 @@
 import os
+import shutil
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -50,7 +51,12 @@ async def _build_live_api(
     proxy: str | None,
 ) -> tuple[API, str]:
     if username is None or cookies is None:
-        pool = AccountsPool(db_path, raise_when_no_account=True)
+        shared_db = Path(db_path)
+        writable_db = tmp_path / "live-search.db"
+        writable_db.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(shared_db, writable_db)
+
+        pool = AccountsPool(str(writable_db), raise_when_no_account=True)
         accounts = await pool.get_all()
         if not accounts:
             message = f"No accounts available in shared live DB: {db_path}"
