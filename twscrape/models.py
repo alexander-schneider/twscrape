@@ -91,8 +91,8 @@ class UserRef(JSONTrait):
     @staticmethod
     def parse(obj: dict):
         id_str = str(obj.get("rest_id") or obj.get("id_str") or obj["id"])
-        username = obj.get("screen_name") or get_or(obj, "core.screen_name")
-        displayname = obj.get("name") or get_or(obj, "core.name")
+        username = obj.get("screen_name") or get_or(obj, "core.screen_name") or ""
+        displayname = obj.get("name") or get_or(obj, "core.name") or ""
         return UserRef(
             id=int(id_str),
             id_str=id_str,
@@ -142,12 +142,12 @@ class User(JSONTrait):
         verification = obj.get("verification") or {}
 
         id_str = str(obj.get("rest_id") or obj.get("id_str") or obj["id"])
-        username = obj.get("screen_name") or core.get("screen_name")
-        displayname = obj.get("name") or core.get("name")
+        username = obj.get("screen_name") or core.get("screen_name") or ""
+        displayname = obj.get("name") or core.get("name") or ""
         created_at = obj.get("created_at") or core.get("created_at")
         description = obj.get("description") or legacy.get("description") or profile_bio.get("description", "")
         entities = obj.get("entities") or legacy.get("entities") or {}
-        profile_image_url = obj.get("profile_image_url_https") or avatar.get("image_url")
+        profile_image_url = obj.get("profile_image_url_https") or avatar.get("image_url") or ""
         profile_banner_url = obj.get("profile_banner_url") or legacy.get("profile_banner_url")
         protected = obj.get("protected")
         if protected is None:
@@ -168,7 +168,7 @@ class User(JSONTrait):
             username=username,
             displayname=displayname,
             rawDescription=description,
-            created=email.utils.parsedate_to_datetime(created_at),
+            created=email.utils.parsedate_to_datetime(created_at) if created_at else datetime.min,
             followersCount=obj.get("followers_count", legacy.get("followers_count", 0)),
             friendsCount=obj.get("friends_count", legacy.get("friends_count", 0)),
             statusesCount=obj.get("statuses_count", legacy.get("statuses_count", 0)),
@@ -728,7 +728,7 @@ def _write_dump(kind: str, e: Exception, x: dict, obj: dict):
     logger.error(f"Failed to parse response of {kind}, writing dump to {dumpfile}")
 
 
-def _parse_items(rep: httpx.Response, kind: str, limit: int = -1):
+def _parse_items(rep: httpx.Response | dict, kind: str, limit: int = -1):
     if kind == "user":
         Cls, key = User, "users"
     elif kind == "tweet":
@@ -797,13 +797,13 @@ def parse_trend(rep: httpx.Response) -> Trend | None:
         return None
 
 
-def parse_tweets(rep: httpx.Response, limit: int = -1) -> Generator[Tweet, None, None]:
+def parse_tweets(rep: httpx.Response | dict, limit: int = -1) -> Generator[Tweet, None, None]:
     return _parse_items(rep, "tweet", limit)  # type: ignore
 
 
-def parse_users(rep: httpx.Response, limit: int = -1) -> Generator[User, None, None]:
+def parse_users(rep: httpx.Response | dict, limit: int = -1) -> Generator[User, None, None]:
     return _parse_items(rep, "user", limit)  # type: ignore
 
 
-def parse_trends(rep: httpx.Response, limit: int = -1) -> Generator[Trend, None, None]:
+def parse_trends(rep: httpx.Response | dict, limit: int = -1) -> Generator[Trend, None, None]:
     return _parse_items(rep, kind="trends", limit=limit)  # type: ignore
