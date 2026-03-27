@@ -27,6 +27,7 @@ OP_Bookmarks = "-LGfdImKeQz0xS_jjUwzlA/Bookmarks"
 OP_GenericTimelineById = "vQ9kgVqJANpRIFMV5jq2aw/GenericTimelineById"
 
 GQL_URL = "https://x.com/i/api/graphql"
+PUBLIC_GQL_URL = "https://api.x.com/graphql"
 GQL_FEATURES = {  # search values here (view source) https://x.com/
     "articles_preview_enabled": False,
     "c9s_tweet_anatomy_moderator_badge_enabled": True,
@@ -198,12 +199,18 @@ class API:
 
                 yield rep
 
-    async def _gql_item(self, op: str, kv: dict, ft: dict | None = None):
+    async def _gql_item(
+        self,
+        op: str,
+        kv: dict,
+        ft: dict | None = None,
+        gql_url: str = GQL_URL,
+    ):
         ft = ft or {}
         queue = op.split("/")[-1]
         async with QueueClient(self.pool, queue, self.debug, proxy=self.proxy) as client:
             params = {"variables": {**kv}, "features": {**GQL_FEATURES, **ft}}
-            return await client.get(f"{GQL_URL}/{op}", params=encode_params(params))
+            return await client.get(f"{gql_url}/{op}", params=encode_params(params))
 
     # search
 
@@ -247,7 +254,9 @@ class API:
             "subscriptions_feature_can_gift_premium": False,
             "profile_label_improvements_pcf_label_in_post_enabled": False,
         }
-        return await self._gql_item(op, kv, ft)
+        # x.com/i/api/graphql/UserByRestId is currently edge-blocked for browserless clients,
+        # while api.x.com/graphql/UserByRestId still returns the user payload.
+        return await self._gql_item(op, kv, ft, gql_url=PUBLIC_GQL_URL)
 
     async def user_by_id(self, uid: int, kv: KV = None) -> User | None:
         rep = await self.user_by_id_raw(uid, kv=kv)

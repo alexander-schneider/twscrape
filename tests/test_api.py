@@ -165,3 +165,23 @@ async def test_search_deduplicates_across_pages(api_mock: API, monkeypatch):
 
     assert tweet_ids == expected_ids
     assert len(tweet_ids) == len(set(tweet_ids))
+
+
+async def test_user_by_id_uses_public_gql_host(api_mock: API, monkeypatch):
+    calls = []
+
+    async def mock_gql_item(*args, **kwargs):
+        calls.append((args, kwargs))
+        raise MockedError()
+
+    monkeypatch.setattr(api_mock, "_gql_item", mock_gql_item)
+
+    with pytest.raises(MockedError):
+        await api_mock.user_by_id_raw(2244994945)
+
+    assert len(calls) == 1
+    args, kwargs = calls[0]
+    assert args[0] == api_module.OP_UserByRestId
+    assert args[1]["userId"] == "2244994945"
+    assert args[1]["withSafetyModeUserFields"] is True
+    assert kwargs["gql_url"] == api_module.PUBLIC_GQL_URL
