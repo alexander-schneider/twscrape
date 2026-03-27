@@ -63,6 +63,12 @@ async def test_login_all_handles_special_username(pool_mock: AccountsPool, monke
     assert seen == [username]
 
 
+async def test_login_all_empty_usernames_returns_empty_stats(pool_mock: AccountsPool):
+    stats = await pool_mock.login_all([])
+
+    assert stats == {"total": 0, "success": 0, "failed": 0}
+
+
 async def test_relogin_handles_special_username(pool_mock: AccountsPool, monkeypatch):
     username = 'bad"name'
     await pool_mock.add_account(username, "pass1", "email1", "email_pass1")

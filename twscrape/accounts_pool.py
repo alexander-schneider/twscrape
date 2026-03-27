@@ -186,6 +186,9 @@ class AccountsPool:
         if usernames is None:
             qs = "SELECT * FROM accounts WHERE active = false AND error_msg IS NULL"
         else:
+            if not usernames:
+                return {"total": 0, "success": 0, "failed": 0}
+
             placeholders, params = self._usernames_where(usernames)
             qs = f"SELECT * FROM accounts WHERE username IN ({placeholders})"
 
