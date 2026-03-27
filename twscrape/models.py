@@ -5,6 +5,7 @@ import random
 import re
 import string
 import sys
+import tempfile
 import traceback
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
@@ -15,13 +16,50 @@ import httpx
 from .logger import logger
 from .utils import find_item, get_or, int_or, to_old_rep, utc
 
-PARSE_ERROR_DUMP_DIR = "/tmp/twscrape"
+PARSE_ERROR_DUMP_DIR = os.path.join(tempfile.gettempdir(), "twscrape")
 PARSE_ERROR_DUMP_LIMIT = 5
 PARSE_ERROR_LIMIT_PER_RESPONSE = 10
 
 
 class ParseDriftError(Exception):
     pass
+
+
+class ParseErrorDumpWriter:
+    def __init__(self):
+        self.count = 0
+
+    def reset(self) -> None:
+        self.count = 0
+
+    def write(self, kind: str, e: Exception, x: dict, obj: dict):
+        if self.count >= PARSE_ERROR_DUMP_LIMIT:
+            logger.error(
+                "Failed to parse response of "
+                f"{kind}, dump limit reached ({PARSE_ERROR_DUMP_LIMIT}); suppressing extra dumps"
+            )
+            return None
+
+        self.count += 1
+        uniq = "".join(random.choice(string.ascii_lowercase) for _ in range(5))
+        time = utc.now().strftime("%Y-%m-%d_%H-%M-%S")
+        dumpfile = os.path.join(PARSE_ERROR_DUMP_DIR, f"twscrape_parse_error_{time}_{uniq}.txt")
+        os.makedirs(os.path.dirname(dumpfile), exist_ok=True)
+
+        with open(dumpfile, "w") as fp:
+            msg = [
+                f"Error parsing {kind}. Error: {type(e)}",
+                traceback.format_exc(),
+                json.dumps(x, default=str),
+                json.dumps(obj, default=str),
+            ]
+            fp.write("\n\n".join(msg))
+
+        logger.error(f"Failed to parse response of {kind}, writing dump to {dumpfile}")
+        return dumpfile
+
+
+PARSE_ERROR_DUMP_WRITER = ParseErrorDumpWriter()
 
 
 @dataclass
@@ -728,31 +766,7 @@ def _get_views(obj: dict, rt_obj: dict):
 
 
 def _write_dump(kind: str, e: Exception, x: dict, obj: dict):
-    dump_count = getattr(_write_dump, "__count", 0)
-    if dump_count >= PARSE_ERROR_DUMP_LIMIT:
-        logger.error(
-            "Failed to parse response of "
-            f"{kind}, dump limit reached ({PARSE_ERROR_DUMP_LIMIT}); suppressing extra dumps"
-        )
-        return None
-
-    setattr(_write_dump, "__count", dump_count + 1)
-    uniq = "".join(random.choice(string.ascii_lowercase) for _ in range(5))
-    time = utc.now().strftime("%Y-%m-%d_%H-%M-%S")
-    dumpfile = os.path.join(PARSE_ERROR_DUMP_DIR, f"twscrape_parse_error_{time}_{uniq}.txt")
-    os.makedirs(os.path.dirname(dumpfile), exist_ok=True)
-
-    with open(dumpfile, "w") as fp:
-        msg = [
-            f"Error parsing {kind}. Error: {type(e)}",
-            traceback.format_exc(),
-            json.dumps(x, default=str),
-            json.dumps(obj, default=str),
-        ]
-        fp.write("\n\n".join(msg))
-
-    logger.error(f"Failed to parse response of {kind}, writing dump to {dumpfile}")
-    return dumpfile
+    return PARSE_ERROR_DUMP_WRITER.write(kind, e, x, obj)
 
 
 def _parse_items(rep: httpx.Response | dict, kind: str, limit: int = -1):

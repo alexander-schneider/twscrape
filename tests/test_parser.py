@@ -562,7 +562,7 @@ def test_parse_tweets_aborts_after_too_many_item_failures(tmp_path, monkeypatch)
     monkeypatch.setattr("twscrape.models.PARSE_ERROR_DUMP_DIR", str(tmp_path))
     monkeypatch.setattr("twscrape.models.PARSE_ERROR_DUMP_LIMIT", 2)
     monkeypatch.setattr("twscrape.models.PARSE_ERROR_LIMIT_PER_RESPONSE", 3)
-    monkeypatch.setattr(models_module._write_dump, "__count", 0, raising=False)
+    models_module.PARSE_ERROR_DUMP_WRITER.reset()
     monkeypatch.setattr("twscrape.models.to_old_rep", lambda rep: {"tweets": tweets, "users": {}})
     monkeypatch.setattr(
         "twscrape.models.Tweet.parse",
