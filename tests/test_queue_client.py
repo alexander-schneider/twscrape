@@ -3,7 +3,7 @@ from contextlib import aclosing
 import httpx
 from pytest_httpx import HTTPXMock
 
-from twscrape.accounts_pool import AccountsPool
+from twscrape.accounts_pool import GLOBAL_LOCK_QUEUE, AccountsPool
 from twscrape.queue_client import QueueClient
 
 DB_FILE = "/tmp/twscrape_test_queue_client.db"
@@ -115,6 +115,36 @@ async def test_retry_with_same_acc_on_network_error(httpx_mock: HTTPXMock, clien
     # check username added to request obj (for logging)
     username = getattr(rep, "__username", None)
     assert username is not None
+
+
+async def test_loadshed_globally_cools_account_and_switches_queue(
+    httpx_mock: HTTPXMock, client_fixture: CF
+):
+    pool, client = client_fixture
+
+    await client.__aenter__()
+    assert client.ctx is not None
+    assert client.ctx.acc.username == "user1"
+
+    httpx_mock.add_response(
+        url=URL,
+        json={"errors": [{"code": -1, "message": "LoadShed: Unspecified"}]},
+        status_code=200,
+    )
+    httpx_mock.add_response(url=URL, json={"foo": "ok"}, status_code=200)
+
+    rep = await client.get(URL)
+    assert rep is not None
+    assert rep.json() == {"foo": "ok"}
+    assert getattr(rep, "__username", None) == "user2"
+
+    user1 = await pool.get("user1")
+    assert "SearchTimeline" in user1.locks
+    assert GLOBAL_LOCK_QUEUE in user1.locks
+
+    async with QueueClient(pool, "TweetDetail") as tweet_detail_client:
+        assert tweet_detail_client.ctx is not None
+        assert tweet_detail_client.ctx.acc.username == "user2"
 
 
 async def test_ctx_closed_on_break(httpx_mock: HTTPXMock, client_fixture: CF):

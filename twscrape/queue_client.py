@@ -7,13 +7,14 @@ from urllib.parse import urlparse
 import httpx
 from httpx import AsyncClient, Response
 
-from .accounts_pool import Account, AccountsPool
+from .accounts_pool import GLOBAL_LOCK_QUEUE, Account, AccountsPool
 from .logger import logger
 from .utils import utc
 from .xclid import XClIdGen
 
 ReqParams = dict[str, str | int] | None
 TMP_TS = utc.now().isoformat().split(".")[0].replace("T", "_").replace(":", "-")[0:16]
+LOADSHED_COOLDOWN_SECONDS = 120
 
 
 class HandledError(Exception): ...
@@ -134,7 +135,13 @@ class QueueClient:
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         await self._close_ctx()
 
-    async def _close_ctx(self, reset_at=-1, inactive=False, msg: str | None = None):
+    async def _close_ctx(
+        self,
+        reset_at=-1,
+        inactive=False,
+        msg: str | None = None,
+        global_lock=False,
+    ):
         if self.ctx is None:
             return
 
@@ -147,6 +154,8 @@ class QueueClient:
             return
 
         if reset_at > 0:
+            if global_lock:
+                await self.pool.lock_until(ctx.acc.username, GLOBAL_LOCK_QUEUE, reset_at)
             await self.pool.lock_until(ctx.acc.username, self.queue, reset_at, ctx.req_count)
             return
 
@@ -240,6 +249,16 @@ class QueueClient:
         if rep.status_code == 200 and "Authorization" in err_msg:
             logger.warning(f"Authorization unknown error: {log_msg}")
             return
+
+        if "LoadShed" in err_msg:
+            logger.warning(
+                f"LoadShed detected: {log_msg}. Cooling account for {LOADSHED_COOLDOWN_SECONDS}s"
+            )
+            await self._close_ctx(
+                utc.ts() + LOADSHED_COOLDOWN_SECONDS,
+                global_lock=True,
+            )
+            raise HandledError()
 
         if err_msg != "OK":
             logger.warning(f"API unknown error: {log_msg}")
