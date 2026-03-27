@@ -2,10 +2,14 @@ import json
 import os
 from typing import Callable
 
+import pytest
+
+import twscrape.models as models_module
 from twscrape import API, gather
 from twscrape.models import (
     AudiospaceCard,
     BroadcastCard,
+    ParseDriftError,
     PollCard,
     SummaryCard,
     Trend,
@@ -13,6 +17,7 @@ from twscrape.models import (
     User,
     UserRef,
     parse_tweet,
+    parse_tweets,
 )
 
 BASE_DIR = os.path.dirname(__file__)
@@ -549,3 +554,23 @@ async def test_cards():
     assert doc.card._type == "audiospace"
     assert isinstance(doc.card, AudiospaceCard)
     assert doc.card.url is not None
+
+
+def test_parse_tweets_aborts_after_too_many_item_failures(tmp_path, monkeypatch):
+    tweets = {str(idx): {"id": idx} for idx in range(4)}
+
+    monkeypatch.setattr("twscrape.models.PARSE_ERROR_DUMP_DIR", str(tmp_path))
+    monkeypatch.setattr("twscrape.models.PARSE_ERROR_DUMP_LIMIT", 2)
+    monkeypatch.setattr("twscrape.models.PARSE_ERROR_LIMIT_PER_RESPONSE", 3)
+    monkeypatch.setattr(models_module._write_dump, "__count", 0, raising=False)
+    monkeypatch.setattr("twscrape.models.to_old_rep", lambda rep: {"tweets": tweets, "users": {}})
+    monkeypatch.setattr(
+        "twscrape.models.Tweet.parse",
+        lambda obj, res: (_ for _ in ()).throw(ValueError(f"boom-{obj['id']}")),
+    )
+
+    with pytest.raises(ParseDriftError, match="3 item failures"):
+        list(parse_tweets({}))
+
+    dumps = sorted(tmp_path.iterdir())
+    assert len(dumps) == 2

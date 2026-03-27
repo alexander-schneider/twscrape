@@ -15,6 +15,14 @@ import httpx
 from .logger import logger
 from .utils import find_item, get_or, int_or, to_old_rep, utc
 
+PARSE_ERROR_DUMP_DIR = "/tmp/twscrape"
+PARSE_ERROR_DUMP_LIMIT = 5
+PARSE_ERROR_LIMIT_PER_RESPONSE = 10
+
+
+class ParseDriftError(Exception):
+    pass
+
 
 @dataclass
 class JSONTrait:
@@ -720,9 +728,18 @@ def _get_views(obj: dict, rt_obj: dict):
 
 
 def _write_dump(kind: str, e: Exception, x: dict, obj: dict):
+    dump_count = getattr(_write_dump, "__count", 0)
+    if dump_count >= PARSE_ERROR_DUMP_LIMIT:
+        logger.error(
+            "Failed to parse response of "
+            f"{kind}, dump limit reached ({PARSE_ERROR_DUMP_LIMIT}); suppressing extra dumps"
+        )
+        return None
+
+    setattr(_write_dump, "__count", dump_count + 1)
     uniq = "".join(random.choice(string.ascii_lowercase) for _ in range(5))
     time = utc.now().strftime("%Y-%m-%d_%H-%M-%S")
-    dumpfile = f"/tmp/twscrape/twscrape_parse_error_{time}_{uniq}.txt"
+    dumpfile = os.path.join(PARSE_ERROR_DUMP_DIR, f"twscrape_parse_error_{time}_{uniq}.txt")
     os.makedirs(os.path.dirname(dumpfile), exist_ok=True)
 
     with open(dumpfile, "w") as fp:
@@ -735,6 +752,7 @@ def _write_dump(kind: str, e: Exception, x: dict, obj: dict):
         fp.write("\n\n".join(msg))
 
     logger.error(f"Failed to parse response of {kind}, writing dump to {dumpfile}")
+    return dumpfile
 
 
 def _parse_items(rep: httpx.Response | dict, kind: str, limit: int = -1):
@@ -752,6 +770,7 @@ def _parse_items(rep: httpx.Response | dict, kind: str, limit: int = -1):
     obj = to_old_rep(res)
 
     ids = set()
+    parse_failures = 0
     for x in obj[key].values():
         if limit != -1 and len(ids) >= limit:
             # todo: move somewhere in configuration like force_limit
@@ -765,7 +784,13 @@ def _parse_items(rep: httpx.Response | dict, kind: str, limit: int = -1):
                 ids.add(tmp.id)
                 yield tmp
         except Exception as e:
+            parse_failures += 1
             _write_dump(kind, e, x, obj)
+            if parse_failures >= PARSE_ERROR_LIMIT_PER_RESPONSE:
+                raise ParseDriftError(
+                    f"Aborting {kind} parsing after {parse_failures} item failures "
+                    "to avoid returning partial data"
+                ) from e
             continue
 
 
