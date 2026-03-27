@@ -1,7 +1,15 @@
+import httpx
 import pytest
 from bs4 import BeautifulSoup
 
-from twscrape.xclid import get_scripts_list, load_keys, parse_anim_idx
+from twscrape.xclid import (
+    XClIdError,
+    XClIdGen,
+    get_scripts_list,
+    get_tw_page_text,
+    load_keys,
+    parse_anim_idx,
+)
 
 
 def test_get_scripts_list_malformed_json():
@@ -135,6 +143,98 @@ async def test_parse_anim_idx_falls_back_to_main_bundle_when_ondemand_missing(mo
 
 
 @pytest.mark.asyncio
+async def test_parse_anim_idx_skips_failing_bundle_fetches(monkeypatch):
+    html = """
+    <html>
+      <head>
+        <script src="https://abs.twimg.com/responsive-web/client-web/main.29dcc91a.js"></script>
+      </head>
+      <body>
+        <script>
+          window.__SOMETHING__ = {"ondemand.s":"246a373"};
+        </script>
+      </body>
+    </html>
+    """
+    request = httpx.Request(
+        "GET", "https://abs.twimg.com/responsive-web/client-web/ondemand.s.246a373a.js"
+    )
+    response = httpx.Response(404, request=request)
+
+    async def fake_get_tw_page_text(url: str, clt=None):
+        if "ondemand.s" in url:
+            raise httpx.HTTPStatusError("not found", request=request, response=response)
+        return "function tid(){return (h[7],16)}"
+
+    monkeypatch.setattr("twscrape.xclid.get_tw_page_text", fake_get_tw_page_text)
+
+    assert await parse_anim_idx(html) == [7]
+
+
+@pytest.mark.asyncio
+async def test_get_tw_page_text_closes_owned_client(monkeypatch):
+    class FakeResponse:
+        def __init__(self, text: str):
+            self.text = text
+
+        def raise_for_status(self):
+            return None
+
+    class FakeClient:
+        def __init__(self):
+            self.closed = False
+
+        async def get(self, url: str):
+            assert url == "https://x.com/tesla"
+            return FakeResponse("<html>ok</html>")
+
+        async def aclose(self):
+            self.closed = True
+
+    fake_client = FakeClient()
+    monkeypatch.setattr("twscrape.xclid._make_client", lambda: fake_client)
+
+    assert await get_tw_page_text("https://x.com/tesla") == "<html>ok</html>"
+    assert fake_client.closed is True
+
+
+@pytest.mark.asyncio
+async def test_xclid_create_retries_transient_generation_errors(monkeypatch):
+    class FakeClient:
+        def __init__(self):
+            self.closed = False
+
+        async def aclose(self):
+            self.closed = True
+
+    fake_client = FakeClient()
+    attempts = {"count": 0}
+
+    async def fake_get_tw_page_text(url: str, clt=None):
+        return "<html></html>"
+
+    async def fake_load_keys(page_text: str, soup, clt=None):
+        attempts["count"] += 1
+        if attempts["count"] < 2:
+            raise XClIdError("transient")
+        return [1] * 64, "anim-key"
+
+    async def fake_sleep(_seconds: float):
+        return None
+
+    monkeypatch.setattr("twscrape.xclid._make_client", lambda: fake_client)
+    monkeypatch.setattr("twscrape.xclid.get_tw_page_text", fake_get_tw_page_text)
+    monkeypatch.setattr("twscrape.xclid.load_keys", fake_load_keys)
+    monkeypatch.setattr("twscrape.xclid.asyncio.sleep", fake_sleep)
+
+    gen = await XClIdGen.create()
+
+    assert attempts["count"] == 2
+    assert gen.anim_key == "anim-key"
+    assert fake_client.closed is True
+
+
+@pytest.mark.asyncio
 async def test_load_keys_uses_raw_html_for_anim_idx(monkeypatch):
     html = """
     <html>
@@ -156,7 +256,7 @@ async def test_load_keys_uses_raw_html_for_anim_idx(monkeypatch):
     """
     seen = {}
 
-    async def fake_parse_anim_idx(text: str):
+    async def fake_parse_anim_idx(text: str, clt=None):
         seen["text"] = text
         return [4, 32, 25, 42]
 

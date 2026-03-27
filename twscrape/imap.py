@@ -4,6 +4,7 @@ import imaplib
 import os
 import time
 from datetime import datetime
+from email.utils import parsedate_to_datetime
 
 from .logger import logger
 
@@ -42,6 +43,18 @@ def add_imap_mapping(email_domain: str, imap_domain: str):
     IMAP_MAPPING[email_domain] = imap_domain
 
 
+def imap_close(imap: imaplib.IMAP4_SSL) -> None:
+    try:
+        imap.close()
+    except (imaplib.IMAP4.error, OSError):
+        pass
+
+    try:
+        imap.logout()
+    except (imaplib.IMAP4.error, OSError):
+        pass
+
+
 def _get_imap_domain(email: str) -> str:
     email_domain = email.split("@")[1]
     if email_domain in IMAP_MAPPING:
@@ -57,8 +70,9 @@ def _wait_email_code(imap: imaplib.IMAP4_SSL, count: int, min_t: datetime | None
                 msg = emaillib.message_from_bytes(x[1])
 
                 # https://www.ietf.org/rfc/rfc9051.html#section-6.3.12-13
-                msg_time = msg.get("Date", "").split("(")[0].strip()
-                msg_time = datetime.strptime(msg_time, "%a, %d %b %Y %H:%M:%S %z")
+                msg_time = parsedate_to_datetime(msg.get("Date", ""))
+                if msg_time is None:
+                    continue
 
                 msg_from = str(msg.get("From", "")).lower()
                 msg_subj = str(msg.get("Subject", "")).lower()
@@ -91,10 +105,9 @@ async def imap_get_email_code(
                 raise EmailCodeTimeoutError(f"Email code timeout ({TWS_WAIT_EMAIL_CODE} sec)")
 
             await asyncio.sleep(5)
-    except Exception as e:
-        imap.select("INBOX")
-        imap.close()
-        raise e
+    except Exception:
+        imap_close(imap)
+        raise
 
 
 async def imap_login(email: str, password: str):
@@ -105,6 +118,7 @@ async def imap_login(email: str, password: str):
         imap.login(email, password)
         imap.select("INBOX", readonly=True)
     except imaplib.IMAP4.error as e:
+        imap_close(imap)
         logger.error(f"Error logging into {email} on {domain}: {e}")
         raise EmailLoginError() from e
 

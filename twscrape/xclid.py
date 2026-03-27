@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import hashlib
 import json
@@ -11,35 +12,44 @@ import httpx
 from fake_useragent import UserAgent
 
 
+class XClIdError(Exception):
+    pass
+
+
 def _make_client() -> httpx.AsyncClient:
     headers = {"user-agent": UserAgent().chrome}
     return httpx.AsyncClient(headers=headers, follow_redirects=True)
 
 
 async def get_tw_page_text(url: str, clt: httpx.AsyncClient | None = None):
+    owns_client = clt is None
     clt = clt or _make_client()
-    rep = await clt.get(url)
 
-    rep.raise_for_status()
-    if ">document.location =" not in rep.text:
+    try:
+        rep = await clt.get(url)
+        rep.raise_for_status()
+        if ">document.location =" not in rep.text:
+            return rep.text
+
+        url = rep.text.split('document.location = "')[1].split('"')[0]
+        rep = await clt.get(url)
+        rep.raise_for_status()
+        if 'action="https://x.com/x/migrate" method="post"' not in rep.text:
+            return rep.text
+
+        data = {}
+        for x in rep.text.split("<input")[1:]:
+            name = x.split('name="')[1].split('"')[0]
+            value = x.split('value="')[1].split('"')[0]
+            data[name] = value
+
+        rep = await clt.post("https://x.com/x/migrate", json=data)
+        rep.raise_for_status()
+
         return rep.text
-
-    url = rep.text.split('document.location = "')[1].split('"')[0]
-    rep = await clt.get(url)
-    rep.raise_for_status()
-    if 'action="https://x.com/x/migrate" method="post"' not in rep.text:
-        return rep.text
-
-    data = {}
-    for x in rep.text.split("<input")[1:]:
-        name = x.split('name="')[1].split('"')[0]
-        value = x.split('value="')[1].split('"')[0]
-        data[name] = value
-
-    rep = await clt.post("https://x.com/x/migrate", json=data)
-    rep.raise_for_status()
-
-    return rep.text
+    finally:
+        if owns_client:
+            await clt.aclose()
 
 
 def script_url(k: str, v: str):
@@ -60,7 +70,7 @@ def _parse_legacy_scripts_map(scripts: str):
             )
             data = json.loads(fixed_scripts)
         except Exception:
-            raise Exception("Failed to parse scripts") from e
+            raise XClIdError("Failed to parse scripts") from e
 
     for k, v in data.items():
         yield script_url(k, f"{v}a")
@@ -110,7 +120,7 @@ def get_scripts_list(text: str):
         yield from urls
         return
 
-    raise Exception("Failed to parse scripts")
+    raise XClIdError("Failed to parse scripts")
 
 
 # MARK: XClientTxId parsing
@@ -165,7 +175,8 @@ class Cubic:  # cubic_curve.py
 
 
 def interpolate(from_list: list[float], to_list: list[float], f: float):
-    assert len(from_list) == len(to_list), f"Mismatched interpolation args {from_list}: {to_list}"
+    if len(from_list) != len(to_list):
+        raise ValueError(f"Mismatched interpolation args {from_list}: {to_list}")
     return [a * (1 - f) + b * f for a, b in zip(from_list, to_list)]
 
 
@@ -251,26 +262,31 @@ def parse_vk_bytes(soup: bs4.BeautifulSoup) -> list[int]:
     el = soup.find("meta", {"name": "twitter-site-verification", "content": True})
     el = str(el.get("content")) if el and isinstance(el, bs4.Tag) else None
     if not el:
-        raise Exception("Couldn't get XClientTxId key bytes")
+        raise XClIdError("Couldn't get XClientTxId key bytes")
 
     return list(base64.b64decode(bytes(el, "utf-8")))
 
 
-async def parse_anim_idx(text: str) -> list[int]:
+async def parse_anim_idx(text: str, clt: httpx.AsyncClient | None = None) -> list[int]:
     scripts = list(get_scripts_list(text))
     preferred_scripts = [x for x in scripts if "/ondemand.s." in x]
     fallback_scripts = [x for x in scripts if x not in preferred_scripts]
     scripts = preferred_scripts + fallback_scripts
     if not scripts:
-        raise Exception("Couldn't get XClientTxId scripts")
+        raise XClIdError("Couldn't get XClientTxId scripts")
 
+    last_error: Exception | None = None
     for script_url in scripts:
-        text = await get_tw_page_text(script_url)
-        items = [int(x.group(2)) for x in INDICES_REGEX.finditer(text)]
-        if items:
-            return items
+        try:
+            script_text = await get_tw_page_text(script_url, clt=clt)
+            items = [int(x.group(2)) for x in INDICES_REGEX.finditer(script_text)]
+            if items:
+                return items
+        except Exception as e:
+            last_error = e
+            continue
 
-    raise Exception("Couldn't get XClientTxId indices")
+    raise XClIdError("Couldn't get XClientTxId indices") from last_error
 
 
 def parse_anim_arr(soup: bs4.BeautifulSoup, vk_bytes: list[int]) -> list[list[float]]:
@@ -278,7 +294,7 @@ def parse_anim_arr(soup: bs4.BeautifulSoup, vk_bytes: list[int]) -> list[list[fl
     els = list(soup.select("svg[id^='loading-x-anim'] g:first-child path:nth-child(2)"))
     els = [str(x.get("d") or "").strip() for x in els]
     if not els:
-        raise Exception("Couldn't get XClientTxId animation array")
+        raise XClIdError("Couldn't get XClientTxId animation array")
 
     idx = vk_bytes[5] % len(els)
     dat = els[idx][9:].split("C")
@@ -286,8 +302,10 @@ def parse_anim_arr(soup: bs4.BeautifulSoup, vk_bytes: list[int]) -> list[list[fl
     return arr
 
 
-async def load_keys(page_text: str, soup: bs4.BeautifulSoup) -> tuple[list[int], str]:
-    anim_idx = await parse_anim_idx(page_text)
+async def load_keys(
+    page_text: str, soup: bs4.BeautifulSoup, clt: httpx.AsyncClient | None = None
+) -> tuple[list[int], str]:
+    anim_idx = await parse_anim_idx(page_text, clt=clt)
     vk_bytes = parse_vk_bytes(soup)
     anim_arr = parse_anim_arr(soup, vk_bytes)
 
@@ -306,12 +324,25 @@ async def load_keys(page_text: str, soup: bs4.BeautifulSoup) -> tuple[list[int],
 class XClIdGen:
     @staticmethod
     async def create(clt: httpx.AsyncClient | None = None) -> "XClIdGen":
-        text = await get_tw_page_text("https://x.com/tesla", clt=clt)
-        soup = bs4.BeautifulSoup(text, "html.parser")
+        owns_client = clt is None
+        clt = clt or _make_client()
+        last_error: Exception | None = None
 
-        vk_bytes, anim_key = await load_keys(text, soup)
-        clid_gen = XClIdGen(vk_bytes, anim_key)
-        return clid_gen
+        try:
+            for _ in range(3):
+                try:
+                    text = await get_tw_page_text("https://x.com/tesla", clt=clt)
+                    soup = bs4.BeautifulSoup(text, "html.parser")
+                    vk_bytes, anim_key = await load_keys(text, soup, clt=clt)
+                    return XClIdGen(vk_bytes, anim_key)
+                except (httpx.HTTPError, XClIdError) as e:
+                    last_error = e
+                    await asyncio.sleep(1)
+        finally:
+            if owns_client:
+                await clt.aclose()
+
+        raise XClIdError("Couldn't initialize XClient transaction id generator") from last_error
 
     def __init__(self, vk_bytes: list[int], anim_key: str):
         self.vk_bytes = vk_bytes
