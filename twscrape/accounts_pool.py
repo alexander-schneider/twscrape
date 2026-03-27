@@ -317,14 +317,15 @@ class AccountsPool:
 
     async def next_available_at(self, queue: str):
         qs = f"""
-        SELECT json_extract(locks, '$."{queue}"') as lock_until
+        SELECT MIN(lock_entry.value) as lock_until
         FROM accounts
-        WHERE active = true AND json_extract(locks, '$."{queue}"') IS NOT NULL
-        ORDER BY lock_until ASC
-        LIMIT 1
+        JOIN json_each(locks) AS lock_entry
+        WHERE active = true
+            AND lock_entry.key IN ('{queue}', '{GLOBAL_LOCK_QUEUE}')
+            AND lock_entry.value IS NOT NULL
         """
         rs = await fetchone(self._db_file, qs)
-        if rs:
+        if rs and rs[0]:
             now, trg = utc.now(), utc.from_iso(rs[0])
             if trg < now:
                 return "now"

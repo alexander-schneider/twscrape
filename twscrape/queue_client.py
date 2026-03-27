@@ -154,9 +154,9 @@ class QueueClient:
             return
 
         if reset_at > 0:
-            await self.pool.lock_until(ctx.acc.username, self.queue, reset_at, ctx.req_count)
             if global_lock:
                 await self.pool.lock_until(ctx.acc.username, GLOBAL_LOCK_QUEUE, reset_at)
+            await self.pool.lock_until(ctx.acc.username, self.queue, reset_at, ctx.req_count)
             return
 
         await self.pool.unlock(ctx.acc.username, self.queue, ctx.req_count)

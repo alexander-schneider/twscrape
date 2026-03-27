@@ -142,13 +142,9 @@ async def test_loadshed_globally_cools_account_and_switches_queue(
     assert "SearchTimeline" in user1.locks
     assert GLOBAL_LOCK_QUEUE in user1.locks
 
-    tweet_detail_client = QueueClient(pool, "TweetDetail")
-    await tweet_detail_client.__aenter__()
-    try:
+    async with QueueClient(pool, "TweetDetail") as tweet_detail_client:
         assert tweet_detail_client.ctx is not None
         assert tweet_detail_client.ctx.acc.username == "user2"
-    finally:
-        await tweet_detail_client.__aexit__(None, None, None)
 
 
 async def test_ctx_closed_on_break(httpx_mock: HTTPXMock, client_fixture: CF):
