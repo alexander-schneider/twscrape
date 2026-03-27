@@ -186,7 +186,7 @@ def check_trend(doc: Trend):
 
     assert doc.trend_url.url is not None
     assert doc.trend_url.urlType is not None
-    assert doc.trend_url.urlEndpointOptions
+    assert isinstance(doc.trend_url.urlEndpointOptions, list)
 
 
 async def test_search():
@@ -442,6 +442,41 @@ async def test_trends():
 
     for doc in items:
         check_trend(doc)
+
+
+async def test_trend_parse_without_url_endpoint_options():
+    doc = Trend.parse(
+        {
+            "name": "Developers",
+            "rank": "1",
+            "trend_url": {
+                "url": "twitter://trending/?trend_name=Developers",
+                "urlType": "DeepLink",
+            },
+            "trend_metadata": {
+                "url": {
+                    "url": "twitter://trending/?trend_name=Developers",
+                    "urlType": "DeepLink",
+                },
+            },
+            "grouped_trends": [
+                {
+                    "name": "Open Source",
+                    "url": {
+                        "url": "twitter://trending/?trend_name=Open%20Source",
+                        "urlType": "DeepLink",
+                    },
+                }
+            ],
+        }
+    )
+
+    assert doc.rank == 1
+    assert doc.trend_url.urlEndpointOptions == []
+    assert doc.trend_metadata.domain_context == ""
+    assert doc.trend_metadata.meta_description == ""
+    assert doc.trend_metadata.url.urlEndpointOptions == []
+    assert doc.grouped_trends[0].url.urlEndpointOptions == []
 
 
 async def test_tweet_with_video():

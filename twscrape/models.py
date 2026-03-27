@@ -498,12 +498,12 @@ class TrendUrl(JSONTrait):
 
     @staticmethod
     def parse(obj: dict):
+        request_params = obj.get("urtEndpointOptions", {}).get("requestParams", [])
         return TrendUrl(
             url=obj["url"],
             urlType=obj["urlType"],
             urlEndpointOptions=[
-                RequestParam(key=x["key"], value=x["value"])
-                for x in obj["urtEndpointOptions"]["requestParams"]
+                RequestParam(key=x["key"], value=x["value"]) for x in request_params
             ],
         )
 
@@ -517,8 +517,8 @@ class TrendMetadata(JSONTrait):
     @staticmethod
     def parse(obj: dict):
         return TrendMetadata(
-            domain_context=obj["domain_context"],
-            meta_description=obj["meta_description"],
+            domain_context=obj.get("domain_context", ""),
+            meta_description=obj.get("meta_description", ""),
             url=TrendUrl.parse(obj["url"]),
         )
 

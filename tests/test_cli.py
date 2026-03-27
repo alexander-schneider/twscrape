@@ -1,9 +1,10 @@
+import sys
 from types import SimpleNamespace
 
 import pytest
 
 import twscrape.cli as cli
-from twscrape.queue_client import ApiFeatureUpdateRequiredError
+from twscrape.queue_client import ApiFeatureUpdateRequiredError, UnexpectedApiError
 
 
 class FakePool:
@@ -179,6 +180,22 @@ def test_run_exits_on_feature_update_error(monkeypatch):
     def fake_run(coro):
         coro.close()
         raise ApiFeatureUpdateRequiredError("update required")
+
+    monkeypatch.setattr(cli, "build_parser", lambda: FakeParser())
+    monkeypatch.setattr(cli.asyncio, "run", fake_run)
+
+    with pytest.raises(SystemExit, match="1"):
+        cli.run()
+
+
+def test_run_exits_on_unexpected_api_error(monkeypatch):
+    class FakeParser:
+        def parse_args(self):
+            return SimpleNamespace(command="search")
+
+    def fake_run(coro):
+        coro.close()
+        raise UnexpectedApiError("HTML edge block (403) for UserByRestId")
 
     monkeypatch.setattr(cli, "build_parser", lambda: FakeParser())
     monkeypatch.setattr(cli.asyncio, "run", fake_run)

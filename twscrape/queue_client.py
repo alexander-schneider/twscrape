@@ -31,6 +31,21 @@ class ApiFeatureUpdateRequiredError(Exception): ...
 class UnexpectedApiError(Exception): ...
 
 
+def is_html_edge_block(rep: Response, res: Any) -> bool:
+    if rep.status_code != 403:
+        return False
+
+    content_type = rep.headers.get("content-type", "").lower()
+    raw = res.get("_raw", "") if isinstance(res, dict) else ""
+    if not isinstance(raw, str):
+        return False
+
+    raw_lower = raw.lower()
+    return "text/html" in content_type and (
+        "cloudflare" in raw_lower or "attention required" in raw_lower or "<html" in raw_lower
+    )
+
+
 class XClIdGenStore:
     items: dict[str, XClIdGen] = {}  # username -> XClIdGen
 
@@ -235,6 +250,15 @@ class QueueClient:
             logger.warning(f"Session expired or banned: {log_msg}")
             await self._close_ctx(-1, inactive=True, msg=err_msg)
             raise HandledError()
+
+        if is_html_edge_block(rep, res):
+            logger.warning(
+                f"HTML edge block detected: {log_msg}. Cooling queue for {UNKNOWN_API_ERROR_COOLDOWN_SECONDS}s"
+            )
+            await self._close_ctx(utc.ts() + UNKNOWN_API_ERROR_COOLDOWN_SECONDS)
+            raise UnexpectedApiError(
+                f"HTML edge block ({rep.status_code}) for {self.queue}. The account stays active for other queues."
+            )
 
         if err_msg == "OK" and rep.status_code == 403:
             logger.warning(f"Session expired or banned: {log_msg}")

@@ -24,7 +24,7 @@ OP_BlueVerifiedFollowers = "4zBtcnE_c0v8wn1Zx0yF5Q/BlueVerifiedFollowers"
 OP_UserCreatorSubscriptions = "Xe0o9ZDBW6UjJTfFn0pdLQ/UserCreatorSubscriptions"
 OP_UserMedia = "U1Zgdsu2qjBi8JF74lTmJQ/UserMedia"
 OP_Bookmarks = "-LGfdImKeQz0xS_jjUwzlA/Bookmarks"
-OP_GenericTimelineById = "IXBKaPnXncdeAOoCEgco4A/GenericTimelineById"
+OP_GenericTimelineById = "vQ9kgVqJANpRIFMV5jq2aw/GenericTimelineById"
 
 GQL_URL = "https://x.com/i/api/graphql"
 GQL_FEATURES = {  # search values here (view source) https://x.com/

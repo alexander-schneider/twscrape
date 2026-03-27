@@ -217,6 +217,34 @@ async def test_unknown_api_errors_fail_closed_and_cool_account(
     assert getattr(rep, "__username", None) == "user2"
 
 
+async def test_html_403_cools_only_the_current_queue(httpx_mock: HTTPXMock, client_fixture: CF):
+    pool, client = client_fixture
+
+    await client.__aenter__()
+    assert client.ctx is not None
+    assert client.ctx.acc.username == "user1"
+
+    httpx_mock.add_response(
+        url=URL,
+        text="<html><head><title>Attention Required! | Cloudflare</title></head></html>",
+        status_code=403,
+        headers={"content-type": "text/html; charset=UTF-8"},
+    )
+
+    with pytest.raises(UnexpectedApiError, match="HTML edge block"):
+        await client.get(URL)
+
+    assert client.ctx is None
+
+    user1 = await pool.get("user1")
+    assert user1.active is True
+    assert "SearchTimeline" in user1.locks
+
+    async with QueueClient(pool, "TweetDetail") as tweet_detail_client:
+        assert tweet_detail_client.ctx is not None
+        assert tweet_detail_client.ctx.acc.username == "user1"
+
+
 async def test_ctx_closed_on_break(httpx_mock: HTTPXMock, client_fixture: CF):
     pool, client = client_fixture
 
