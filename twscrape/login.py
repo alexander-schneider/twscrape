@@ -7,7 +7,7 @@ import pyotp
 from httpx import AsyncClient, Response
 
 from .account import Account
-from .imap import imap_get_email_code, imap_login
+from .imap import imap_close, imap_get_email_code, imap_login
 from .logger import logger
 from .utils import utc
 
@@ -18,6 +18,18 @@ LOGIN_URL = "https://api.x.com/1.1/onboarding/task.json"
 class LoginConfig:
     email_first: bool = False
     manual: bool = False
+
+
+class LoginError(Exception):
+    pass
+
+
+class LoginProtocolError(LoginError):
+    pass
+
+
+class UnsupportedLoginSubtaskError(LoginError):
+    pass
 
 
 @dataclass
@@ -217,10 +229,16 @@ async def next_login_task(ctx: TaskCtx, rep: Response):
         ctx.client.headers["x-twitter-auth-type"] = "OAuth2Session"
 
     ctx.prev = rep.json()
-    assert "flow_token" in ctx.prev, f"flow_token not in {rep.text}"
+    flow_token = ctx.prev.get("flow_token")
+    if not isinstance(flow_token, str) or flow_token == "":
+        raise LoginProtocolError(f"flow_token missing from login response: {rep.text}")
 
-    for x in ctx.prev["subtasks"]:
-        task_id = x["subtask_id"]
+    subtasks = ctx.prev.get("subtasks")
+    if not isinstance(subtasks, list):
+        raise LoginProtocolError(f"subtasks missing from login response: {rep.text}")
+
+    for x in subtasks:
+        task_id = x.get("subtask_id", "<UNKNOWN>")
 
         try:
             if task_id == "LoginSuccessSubtask":
@@ -242,10 +260,15 @@ async def next_login_task(ctx: TaskCtx, rep: Response):
             if task_id == "LoginEnterAlternateIdentifierSubtask":
                 return await login_alternate_identifier(ctx, username=ctx.acc.username)
         except Exception as e:
-            ctx.acc.error_msg = f"login_step={task_id} err={e}"
-            raise e
+            ctx.acc.error_msg = f"login_step={task_id} err={type(e).__name__}: {e}"
+            raise
 
-    return None
+    if not subtasks:
+        return None
+
+    task_ids = ",".join(str(x.get("subtask_id", "<UNKNOWN>")) for x in subtasks)
+    ctx.acc.error_msg = f"unsupported_login_subtasks={task_ids}"
+    raise UnsupportedLoginSubtaskError(f"Unsupported login subtasks: {task_ids}")
 
 
 async def login(acc: Account, cfg: LoginConfig | None = None) -> Account:
@@ -254,26 +277,34 @@ async def login(acc: Account, cfg: LoginConfig | None = None) -> Account:
         logger.info(f"account already active {log_id}")
         return acc
 
-    cfg, imap = cfg or LoginConfig(), None
+    cfg, imap, ctx = cfg or LoginConfig(), None, None
     if cfg.email_first and not cfg.manual:
         imap = await imap_login(acc.email, acc.email_password)
 
-    async with acc.make_client() as client:
-        guest_token = await get_guest_token(client)
-        client.headers["x-guest-token"] = guest_token
+    try:
+        async with acc.make_client() as client:
+            guest_token = await get_guest_token(client)
+            client.headers["x-guest-token"] = guest_token
 
-        rep = await login_initiate(client)
-        ctx = TaskCtx(client, acc, cfg, None, imap)
-        while True:
-            rep = await next_login_task(ctx, rep)
-            if not rep:
-                break
+            rep = await login_initiate(client)
+            ctx = TaskCtx(client, acc, cfg, None, imap)
+            while True:
+                rep = await next_login_task(ctx, rep)
+                if rep is None:
+                    break
 
-        assert "ct0" in client.cookies, "ct0 not in cookies (most likely ip ban)"
-        client.headers["x-csrf-token"] = client.cookies["ct0"]
-        client.headers["x-twitter-auth-type"] = "OAuth2Session"
+            if "ct0" not in client.cookies:
+                raise LoginProtocolError("ct0 not in cookies (most likely ip ban)")
 
-        acc.active = True
-        acc.headers = {k: v for k, v in client.headers.items()}
-        acc.cookies = {k: v for k, v in client.cookies.items()}
-        return acc
+            client.headers["x-csrf-token"] = client.cookies["ct0"]
+            client.headers["x-twitter-auth-type"] = "OAuth2Session"
+
+            acc.active = True
+            acc.error_msg = None
+            acc.headers = {k: v for k, v in client.headers.items()}
+            acc.cookies = {k: v for k, v in client.cookies.items()}
+            return acc
+    finally:
+        imap_conn = ctx.imap if ctx and ctx.imap is not None else imap
+        if imap_conn is not None:
+            imap_close(imap_conn)
