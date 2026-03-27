@@ -1,4 +1,4 @@
-from twscrape.accounts_pool import AccountsPool
+from twscrape.accounts_pool import GLOBAL_LOCK_QUEUE, AccountsPool
 from twscrape.utils import utc
 
 
@@ -107,6 +107,17 @@ async def test_account_unlock(pool_mock: AccountsPool):
 
     acc = await pool_mock.get(acc.username)
     assert int(acc.locks[Q].timestamp()) == end_time
+
+
+async def test_global_lock_blocks_all_queues(pool_mock: AccountsPool):
+    await pool_mock.add_account("user1", "pass1", "email1", "email_pass1")
+    await pool_mock.set_active("user1", True)
+
+    end_time = utc.ts() + 120
+    await pool_mock.lock_until("user1", GLOBAL_LOCK_QUEUE, end_time)
+
+    acc = await pool_mock.get_for_queue("SearchTimeline")
+    assert acc is None
 
 
 async def test_get_stats(pool_mock: AccountsPool):

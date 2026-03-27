@@ -27,6 +27,9 @@ class AccountInfo(TypedDict):
     error_msg: str | None
 
 
+GLOBAL_LOCK_QUEUE = "__global__"
+
+
 def guess_delim(line: str):
     lp, rp = tuple([x.strip() for x in line.split("username")])
     return rp[0] if not lp else lp[-1]
@@ -273,6 +276,9 @@ class AccountsPool:
         q = f"""
         SELECT username FROM accounts
         WHERE active = true AND (
+            json_extract(locks, '$."{GLOBAL_LOCK_QUEUE}"') IS NULL
+            OR json_extract(locks, '$."{GLOBAL_LOCK_QUEUE}"') < datetime('now')
+        ) AND (
             locks IS NULL
             OR json_extract(locks, '$.{queue}') IS NULL
             OR json_extract(locks, '$.{queue}') < datetime('now')
