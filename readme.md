@@ -11,8 +11,9 @@ Twitter GraphQL API implementation with [SNScrape](https://github.com/JustAnothe
 
 This repository is an Adanos-maintained fork of the original
 [`vladkens/twscrape`](https://github.com/vladkens/twscrape).
-The original project is still the upstream reference.
-This fork contains local fixes and smoke-test tooling used by Adanos projects.
+The original project remains the historical upstream reference.
+This fork is the active source of truth for fixes used by Adanos projects.
+Please open issues and pull requests in this repository.
 
 <div align="center">
   <img src=".github/example.png" alt="example of cli usage" height="400px">
@@ -174,7 +175,7 @@ The script will prompt for credentials and, if needed, for the email verificatio
 
 This project requires authorized X/Twitter accounts to work with the API. You have two options:
 
-1. **Create Your Own Account**: While you can register a new account on X/Twitter yourself, it's can be difficult due to strict verification processes and high ban rates.
+1. **Create Your Own Account**: While you can register a new account on X/Twitter yourself, it can be difficult due to strict verification processes and high ban rates.
 
 2. **Use Ready Accounts**: For immediate access, you can get ready-to-use accounts with cookies from [our recommended provider](https://kutt.it/ueeM5f). Cookie-based accounts typically have fewer login issues.
 
@@ -261,9 +262,9 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-### Stoping iteration with break
+### Stopping iteration with break
 
-In order to correctly release an account in case of `break` in loop, a special syntax must be used. Otherwise, Python's events loop will release lock on the account sometime in the future. See explanation [here](https://github.com/vladkens/twscrape/issues/27#issuecomment-1623395424).
+In order to correctly release an account in case of `break` in a loop, a special syntax must be used. Otherwise, Python's event loop will release the lock on the account sometime in the future. See explanation [here](https://github.com/vladkens/twscrape/issues/27#issuecomment-1623395424).
 
 ```python
 from contextlib import aclosing
@@ -282,7 +283,7 @@ async with aclosing(api.search("elon musk")) as gen:
 # show all commands
 twscrape
 
-# help on specific comand
+# help on a specific command
 twscrape search --help
 ```
 
@@ -294,7 +295,7 @@ twscrape add_accounts <file_path> <line_format>
 ```
 
 Where:
-`<line_format>` is format of line if accounts file splited by delimeter. Possible tokens:
+`<line_format>` is the format of each line in the accounts file, split by a delimiter. Possible tokens:
 - `username` – required
 - `password` – required
 - `email` – required
@@ -302,7 +303,7 @@ Where:
 - `cookies` – can be any parsable format (string, json, base64 string, etc)
 - `_` – skip column from parse
 
-Tokens should be splited by delimeter, usually "`:`" used.
+Tokens should be split by a delimiter, usually "`:`".
 
 Example:
 
@@ -311,7 +312,7 @@ I have account files named `order-12345.txt` with format:
 username:password:email:email password:user_agent:cookies
 ```
 
-Command to add accounts will be (user_agent column skiped with `_`):
+The command to add accounts will be (the `user_agent` column is skipped with `_`):
 ```sh
 twscrape add_accounts ./order-12345.txt username:password:email:email_password:_:cookies
 ```
@@ -447,7 +448,7 @@ doc = await api.user_by_login("elonmusk")  # no proxy used
 
 - `api.proxy` have top priority
 - `env.proxy` will be used if `api.proxy` is None
-- `acc.proxy` have lowest priotity
+- `acc.proxy` has the lowest priority
 
 So if you want to use proxy PER ACCOUNT, do NOT override proxy with env variable or by passing proxy param to API.
 
