@@ -1,4 +1,3 @@
-import sys
 from types import SimpleNamespace
 
 import pytest
