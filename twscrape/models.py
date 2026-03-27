@@ -5,6 +5,7 @@ import random
 import re
 import string
 import sys
+import tempfile
 import traceback
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
@@ -14,6 +15,51 @@ import httpx
 
 from .logger import logger
 from .utils import find_item, get_or, int_or, to_old_rep, utc
+
+PARSE_ERROR_DUMP_DIR = os.path.join(tempfile.gettempdir(), "twscrape")
+PARSE_ERROR_DUMP_LIMIT = 5
+PARSE_ERROR_LIMIT_PER_RESPONSE = 10
+
+
+class ParseDriftError(Exception):
+    pass
+
+
+class ParseErrorDumpWriter:
+    def __init__(self):
+        self.count = 0
+
+    def reset(self) -> None:
+        self.count = 0
+
+    def write(self, kind: str, e: Exception, x: dict, obj: dict):
+        if self.count >= PARSE_ERROR_DUMP_LIMIT:
+            logger.error(
+                "Failed to parse response of "
+                f"{kind}, dump limit reached ({PARSE_ERROR_DUMP_LIMIT}); suppressing extra dumps"
+            )
+            return None
+
+        self.count += 1
+        uniq = "".join(random.choice(string.ascii_lowercase) for _ in range(5))
+        time = utc.now().strftime("%Y-%m-%d_%H-%M-%S")
+        dumpfile = os.path.join(PARSE_ERROR_DUMP_DIR, f"twscrape_parse_error_{time}_{uniq}.txt")
+        os.makedirs(os.path.dirname(dumpfile), exist_ok=True)
+
+        with open(dumpfile, "w") as fp:
+            msg = [
+                f"Error parsing {kind}. Error: {type(e)}",
+                traceback.format_exc(),
+                json.dumps(x, default=str),
+                json.dumps(obj, default=str),
+            ]
+            fp.write("\n\n".join(msg))
+
+        logger.error(f"Failed to parse response of {kind}, writing dump to {dumpfile}")
+        return dumpfile
+
+
+PARSE_ERROR_DUMP_WRITER = ParseErrorDumpWriter()
 
 
 @dataclass
@@ -452,12 +498,12 @@ class TrendUrl(JSONTrait):
 
     @staticmethod
     def parse(obj: dict):
+        request_params = obj.get("urtEndpointOptions", {}).get("requestParams", [])
         return TrendUrl(
             url=obj["url"],
             urlType=obj["urlType"],
             urlEndpointOptions=[
-                RequestParam(key=x["key"], value=x["value"])
-                for x in obj["urtEndpointOptions"]["requestParams"]
+                RequestParam(key=x["key"], value=x["value"]) for x in request_params
             ],
         )
 
@@ -471,8 +517,8 @@ class TrendMetadata(JSONTrait):
     @staticmethod
     def parse(obj: dict):
         return TrendMetadata(
-            domain_context=obj["domain_context"],
-            meta_description=obj["meta_description"],
+            domain_context=obj.get("domain_context", ""),
+            meta_description=obj.get("meta_description", ""),
             url=TrendUrl.parse(obj["url"]),
         )
 
@@ -720,21 +766,7 @@ def _get_views(obj: dict, rt_obj: dict):
 
 
 def _write_dump(kind: str, e: Exception, x: dict, obj: dict):
-    uniq = "".join(random.choice(string.ascii_lowercase) for _ in range(5))
-    time = utc.now().strftime("%Y-%m-%d_%H-%M-%S")
-    dumpfile = f"/tmp/twscrape/twscrape_parse_error_{time}_{uniq}.txt"
-    os.makedirs(os.path.dirname(dumpfile), exist_ok=True)
-
-    with open(dumpfile, "w") as fp:
-        msg = [
-            f"Error parsing {kind}. Error: {type(e)}",
-            traceback.format_exc(),
-            json.dumps(x, default=str),
-            json.dumps(obj, default=str),
-        ]
-        fp.write("\n\n".join(msg))
-
-    logger.error(f"Failed to parse response of {kind}, writing dump to {dumpfile}")
+    return PARSE_ERROR_DUMP_WRITER.write(kind, e, x, obj)
 
 
 def _parse_items(rep: httpx.Response | dict, kind: str, limit: int = -1):
@@ -752,6 +784,7 @@ def _parse_items(rep: httpx.Response | dict, kind: str, limit: int = -1):
     obj = to_old_rep(res)
 
     ids = set()
+    parse_failures = 0
     for x in obj[key].values():
         if limit != -1 and len(ids) >= limit:
             # todo: move somewhere in configuration like force_limit
@@ -765,7 +798,13 @@ def _parse_items(rep: httpx.Response | dict, kind: str, limit: int = -1):
                 ids.add(tmp.id)
                 yield tmp
         except Exception as e:
+            parse_failures += 1
             _write_dump(kind, e, x, obj)
+            if parse_failures >= PARSE_ERROR_LIMIT_PER_RESPONSE:
+                raise ParseDriftError(
+                    f"Aborting {kind} parsing after {parse_failures} item failures "
+                    "to avoid returning partial data"
+                ) from e
             continue
 
 

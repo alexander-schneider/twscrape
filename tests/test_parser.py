@@ -2,10 +2,14 @@ import json
 import os
 from typing import Callable
 
+import pytest
+
+import twscrape.models as models_module
 from twscrape import API, gather
 from twscrape.models import (
     AudiospaceCard,
     BroadcastCard,
+    ParseDriftError,
     PollCard,
     SummaryCard,
     Trend,
@@ -13,6 +17,7 @@ from twscrape.models import (
     User,
     UserRef,
     parse_tweet,
+    parse_tweets,
 )
 
 BASE_DIR = os.path.dirname(__file__)
@@ -181,7 +186,7 @@ def check_trend(doc: Trend):
 
     assert doc.trend_url.url is not None
     assert doc.trend_url.urlType is not None
-    assert doc.trend_url.urlEndpointOptions
+    assert isinstance(doc.trend_url.urlEndpointOptions, list)
 
 
 async def test_search():
@@ -439,6 +444,41 @@ async def test_trends():
         check_trend(doc)
 
 
+async def test_trend_parse_without_url_endpoint_options():
+    doc = Trend.parse(
+        {
+            "name": "Developers",
+            "rank": "1",
+            "trend_url": {
+                "url": "twitter://trending/?trend_name=Developers",
+                "urlType": "DeepLink",
+            },
+            "trend_metadata": {
+                "url": {
+                    "url": "twitter://trending/?trend_name=Developers",
+                    "urlType": "DeepLink",
+                },
+            },
+            "grouped_trends": [
+                {
+                    "name": "Open Source",
+                    "url": {
+                        "url": "twitter://trending/?trend_name=Open%20Source",
+                        "urlType": "DeepLink",
+                    },
+                }
+            ],
+        }
+    )
+
+    assert doc.rank == 1
+    assert doc.trend_url.urlEndpointOptions == []
+    assert doc.trend_metadata.domain_context == ""
+    assert doc.trend_metadata.meta_description == ""
+    assert doc.trend_metadata.url.urlEndpointOptions == []
+    assert doc.grouped_trends[0].url.urlEndpointOptions == []
+
+
 async def test_tweet_with_video():
     api = get_api()
 
@@ -549,3 +589,23 @@ async def test_cards():
     assert doc.card._type == "audiospace"
     assert isinstance(doc.card, AudiospaceCard)
     assert doc.card.url is not None
+
+
+def test_parse_tweets_aborts_after_too_many_item_failures(tmp_path, monkeypatch):
+    tweets = {str(idx): {"id": idx} for idx in range(4)}
+
+    monkeypatch.setattr("twscrape.models.PARSE_ERROR_DUMP_DIR", str(tmp_path))
+    monkeypatch.setattr("twscrape.models.PARSE_ERROR_DUMP_LIMIT", 2)
+    monkeypatch.setattr("twscrape.models.PARSE_ERROR_LIMIT_PER_RESPONSE", 3)
+    models_module.PARSE_ERROR_DUMP_WRITER.reset()
+    monkeypatch.setattr("twscrape.models.to_old_rep", lambda rep: {"tweets": tweets, "users": {}})
+    monkeypatch.setattr(
+        "twscrape.models.Tweet.parse",
+        lambda obj, res: (_ for _ in ()).throw(ValueError(f"boom-{obj['id']}")),
+    )
+
+    with pytest.raises(ParseDriftError, match="3 item failures"):
+        list(parse_tweets({}))
+
+    dumps = sorted(tmp_path.iterdir())
+    assert len(dumps) == 2

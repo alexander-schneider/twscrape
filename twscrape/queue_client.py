@@ -16,6 +16,7 @@ ReqParams = dict[str, str | int] | None
 TMP_TS = utc.now().isoformat().split(".")[0].replace("T", "_").replace(":", "-")[0:16]
 LOADSHED_COOLDOWN_SECONDS = 120
 TRANSPORT_ERROR_RETRY_LIMIT = 3
+UNKNOWN_API_ERROR_COOLDOWN_SECONDS = 60 * 15
 
 
 class HandledError(Exception): ...
@@ -25,6 +26,24 @@ class AbortReqError(Exception): ...
 
 
 class ApiFeatureUpdateRequiredError(Exception): ...
+
+
+class UnexpectedApiError(Exception): ...
+
+
+def is_html_edge_block(rep: Response, res: Any) -> bool:
+    if rep.status_code != 403:
+        return False
+
+    content_type = rep.headers.get("content-type", "").lower()
+    raw = res.get("_raw", "") if isinstance(res, dict) else ""
+    if not isinstance(raw, str):
+        return False
+
+    raw_lower = raw.lower()
+    return "text/html" in content_type and (
+        "cloudflare" in raw_lower or "attention required" in raw_lower or "<html" in raw_lower
+    )
 
 
 class XClIdGenStore:
@@ -232,6 +251,15 @@ class QueueClient:
             await self._close_ctx(-1, inactive=True, msg=err_msg)
             raise HandledError()
 
+        if is_html_edge_block(rep, res):
+            logger.warning(
+                f"HTML edge block detected: {log_msg}. Cooling queue for {UNKNOWN_API_ERROR_COOLDOWN_SECONDS}s"
+            )
+            await self._close_ctx(utc.ts() + UNKNOWN_API_ERROR_COOLDOWN_SECONDS)
+            raise UnexpectedApiError(
+                f"HTML edge block ({rep.status_code}) for {self.queue}. The account stays active for other queues."
+            )
+
         if err_msg == "OK" and rep.status_code == 403:
             logger.warning(f"Session expired or banned: {log_msg}")
             await self._close_ctx(-1, inactive=True, msg=None)
@@ -267,8 +295,11 @@ class QueueClient:
             raise HandledError()
 
         if err_msg != "OK":
-            logger.warning(f"API unknown error: {log_msg}")
-            return  # ignore any other unknown errors
+            logger.error(f"API unknown error: {log_msg}")
+            await self._close_ctx(utc.ts() + UNKNOWN_API_ERROR_COOLDOWN_SECONDS)
+            raise UnexpectedApiError(
+                f"Unhandled X API error ({rep.status_code}) for {self.queue}: {err_msg}"
+            )
 
         try:
             rep.raise_for_status()
@@ -309,6 +340,8 @@ class QueueClient:
                 # abort all queries
                 return
             except ApiFeatureUpdateRequiredError:
+                raise
+            except UnexpectedApiError:
                 raise
             except HandledError:
                 # retry with new account

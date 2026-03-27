@@ -5,7 +5,11 @@ import pytest
 from pytest_httpx import HTTPXMock
 
 from twscrape.accounts_pool import GLOBAL_LOCK_QUEUE, AccountsPool
-from twscrape.queue_client import ApiFeatureUpdateRequiredError, QueueClient
+from twscrape.queue_client import (
+    ApiFeatureUpdateRequiredError,
+    QueueClient,
+    UnexpectedApiError,
+)
 
 DB_FILE = "/tmp/twscrape_test_queue_client.db"
 URL = "https://example.com/api"
@@ -181,6 +185,64 @@ async def test_loadshed_globally_cools_account_and_switches_queue(
     async with QueueClient(pool, "TweetDetail") as tweet_detail_client:
         assert tweet_detail_client.ctx is not None
         assert tweet_detail_client.ctx.acc.username == "user2"
+
+
+async def test_unknown_api_errors_fail_closed_and_cool_account(
+    httpx_mock: HTTPXMock, client_fixture: CF
+):
+    pool, client = client_fixture
+
+    await client.__aenter__()
+    assert client.ctx is not None
+    assert client.ctx.acc.username == "user1"
+
+    httpx_mock.add_response(
+        url=URL,
+        json={"errors": [{"code": 999, "message": "New safety gate required"}]},
+        status_code=200,
+    )
+
+    with pytest.raises(UnexpectedApiError, match="New safety gate required"):
+        await client.get(URL)
+
+    assert client.ctx is None
+
+    user1 = await pool.get("user1")
+    assert "SearchTimeline" in user1.locks
+
+    httpx_mock.add_response(url=URL, json={"foo": "ok"}, status_code=200)
+    rep = await client.get(URL)
+    assert rep is not None
+    assert rep.json() == {"foo": "ok"}
+    assert getattr(rep, "__username", None) == "user2"
+
+
+async def test_html_403_cools_only_the_current_queue(httpx_mock: HTTPXMock, client_fixture: CF):
+    pool, client = client_fixture
+
+    await client.__aenter__()
+    assert client.ctx is not None
+    assert client.ctx.acc.username == "user1"
+
+    httpx_mock.add_response(
+        url=URL,
+        text="<html><head><title>Attention Required! | Cloudflare</title></head></html>",
+        status_code=403,
+        headers={"content-type": "text/html; charset=UTF-8"},
+    )
+
+    with pytest.raises(UnexpectedApiError, match="HTML edge block"):
+        await client.get(URL)
+
+    assert client.ctx is None
+
+    user1 = await pool.get("user1")
+    assert user1.active is True
+    assert "SearchTimeline" in user1.locks
+
+    async with QueueClient(pool, "TweetDetail") as tweet_detail_client:
+        assert tweet_detail_client.ctx is not None
+        assert tweet_detail_client.ctx.acc.username == "user1"
 
 
 async def test_ctx_closed_on_break(httpx_mock: HTTPXMock, client_fixture: CF):
