@@ -76,6 +76,7 @@ def reset_fake_pool_instances():
 @pytest.mark.asyncio
 async def test_main_version_prints_versions(monkeypatch, capsys):
     monkeypatch.setattr(cli, "version", lambda _: "9.9.9")
+    monkeypatch.setattr(cli.sqlite3, "sqlite_version", "3.40.0")
 
     async def fake_sqlite_version():
         return "3.45.1"
@@ -88,7 +89,7 @@ async def test_main_version_prints_versions(monkeypatch, capsys):
     output = capsys.readouterr().out.strip().splitlines()
     assert output == [
         "twscrape: 9.9.9",
-        f"SQLite runtime: {cli.sqlite3.sqlite_version} (3.45.1)",
+        "SQLite runtime: 3.40.0 (3.45.1)",
     ]
 
 
