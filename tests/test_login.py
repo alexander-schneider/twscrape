@@ -113,6 +113,29 @@ async def test_next_login_task_raises_when_flow_token_missing():
 
 
 @pytest.mark.asyncio
+async def test_next_login_task_returns_none_on_empty_subtasks():
+    acc = make_account()
+    ctx = cast(
+        TaskCtx,
+        SimpleNamespace(
+            client=SimpleNamespace(headers={}, cookies={}),
+            acc=acc,
+            cfg=LoginConfig(),
+            prev=None,
+            imap=None,
+        ),
+    )
+
+    result = await next_login_task(
+        ctx,
+        cast(Response, FakeResponse({"flow_token": "token", "subtasks": []})),
+    )
+
+    assert result is None
+    assert acc.error_msg is None
+
+
+@pytest.mark.asyncio
 async def test_accounts_pool_login_persists_generic_error_message(
     pool_mock: AccountsPool, monkeypatch
 ):

@@ -263,7 +263,10 @@ async def next_login_task(ctx: TaskCtx, rep: Response):
             ctx.acc.error_msg = f"login_step={task_id} err={type(e).__name__}: {e}"
             raise
 
-    task_ids = ",".join(str(x.get("subtask_id", "<UNKNOWN>")) for x in subtasks) or "<NONE>"
+    if not subtasks:
+        return None
+
+    task_ids = ",".join(str(x.get("subtask_id", "<UNKNOWN>")) for x in subtasks)
     ctx.acc.error_msg = f"unsupported_login_subtasks={task_ids}"
     raise UnsupportedLoginSubtaskError(f"Unsupported login subtasks: {task_ids}")
 
