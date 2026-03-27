@@ -5,17 +5,22 @@ import asyncio
 import io
 import json
 import sqlite3
+from collections.abc import Awaitable, Callable
 from importlib.metadata import version
 
 import httpx
 
-from .api import API, AccountsPool
+from .accounts_pool import AccountsPool
+from .api import API
 from .db import get_sqlite_version
 from .logger import logger, set_log_level
 from .login import LoginConfig
 from .models import Tweet, User
 from .queue_client import ApiFeatureUpdateRequiredError
 from .utils import print_table
+
+PoolCommandHandler = Callable[[AccountsPool, argparse.Namespace], Awaitable[None]]
+ARG_NAMES = ("query", "tweet_id", "user_id", "username", "list_id", "trend_id")
 
 
 class CustomHelpFormatter(argparse.HelpFormatter):
@@ -24,12 +29,11 @@ class CustomHelpFormatter(argparse.HelpFormatter):
 
 
 def get_fn_arg(args):
-    names = ["query", "tweet_id", "user_id", "username", "list_id", "trend_id"]
-    for name in names:
-        if name in args:
+    for name in ARG_NAMES:
+        if hasattr(args, name):
             return name, getattr(args, name)
 
-    logger.error(f"Missing argument: {names}")
+    logger.error(f"Missing argument: {ARG_NAMES}")
     raise SystemExit(1)
 
 
@@ -41,82 +45,110 @@ def to_str(doc: httpx.Response | Tweet | User | None) -> str:
     return tmp if isinstance(tmp, str) else json.dumps(tmp, default=str)
 
 
+async def _cmd_version() -> None:
+    print(f"twscrape: {version('twscrape')}")
+    print(f"SQLite runtime: {sqlite3.sqlite_version} ({await get_sqlite_version()})")
+
+
+async def _cmd_accounts(pool: AccountsPool, _: argparse.Namespace) -> None:
+    print_table([dict(x) for x in await pool.accounts_info()])
+
+
+async def _cmd_stats(pool: AccountsPool, _: argparse.Namespace) -> None:
+    rep = await pool.stats()
+    total, active, inactive = rep["total"], rep["active"], rep["inactive"]
+
+    rows = [
+        {"queue": key, "locked": value, "available": max(active - value, 0)}
+        for key, value in rep.items()
+        if key.startswith("locked") and value > 0
+    ]
+    rows = sorted(rows, key=lambda x: x["locked"], reverse=True)
+    print_table(rows, hr_after=True)
+    print(f"Total: {total} - Active: {active} - Inactive: {inactive}")
+
+
+async def _cmd_add_accounts(pool: AccountsPool, args: argparse.Namespace) -> None:
+    await pool.load_from_file(args.file_path, args.line_format)
+    print("\nNow run:\ntwscrape login_accounts")
+
+
+async def _cmd_delete_accounts(pool: AccountsPool, args: argparse.Namespace) -> None:
+    await pool.delete_accounts(args.usernames)
+
+
+async def _cmd_login_accounts(pool: AccountsPool, _: argparse.Namespace) -> None:
+    print(await pool.login_all())
+
+
+async def _cmd_relogin_failed(pool: AccountsPool, _: argparse.Namespace) -> None:
+    await pool.relogin_failed()
+
+
+async def _cmd_relogin(pool: AccountsPool, args: argparse.Namespace) -> None:
+    await pool.relogin(args.usernames)
+
+
+async def _cmd_reset_locks(pool: AccountsPool, _: argparse.Namespace) -> None:
+    await pool.reset_locks()
+
+
+async def _cmd_delete_inactive(pool: AccountsPool, _: argparse.Namespace) -> None:
+    await pool.delete_inactive()
+
+
+POOL_COMMANDS: dict[str, PoolCommandHandler] = {
+    "accounts": _cmd_accounts,
+    "stats": _cmd_stats,
+    "add_accounts": _cmd_add_accounts,
+    "del_accounts": _cmd_delete_accounts,
+    "login_accounts": _cmd_login_accounts,
+    "relogin_failed": _cmd_relogin_failed,
+    "relogin": _cmd_relogin,
+    "reset_locks": _cmd_reset_locks,
+    "delete_inactive": _cmd_delete_inactive,
+}
+
+
+async def _print_api_response(fn: Callable, value: str | int, limit: int | None) -> None:
+    if limit is None:
+        print(to_str(await fn(value)))
+        return
+
+    async for doc in fn(value, limit=limit):
+        print(to_str(doc))
+
+
+async def _run_api_command(api: API, args: argparse.Namespace) -> None:
+    fn_name = args.command + "_raw" if args.raw else args.command
+    fn = getattr(api, fn_name, None)
+    if fn is None:
+        logger.error(f"Unknown command: {args.command}")
+        raise SystemExit(1)
+
+    _, value = get_fn_arg(args)
+    limit = getattr(args, "limit", None)
+    await _print_api_response(fn, value, limit)
+
+
 async def main(args):
     if args.debug:
         set_log_level("DEBUG")
 
     if args.command == "version":
-        print(f"twscrape: {version('twscrape')}")
-        print(f"SQLite runtime: {sqlite3.sqlite_version} ({await get_sqlite_version()})")
+        await _cmd_version()
         return
 
     login_config = LoginConfig(getattr(args, "email_first", False), getattr(args, "manual", False))
     pool = AccountsPool(args.db, login_config=login_config)
+
+    handler = POOL_COMMANDS.get(args.command)
+    if handler is not None:
+        await handler(pool, args)
+        return
+
     api = API(pool, debug=args.debug)
-
-    if args.command == "accounts":
-        print_table([dict(x) for x in await pool.accounts_info()])
-        return
-
-    if args.command == "stats":
-        rep = await pool.stats()
-        total, active, inactive = rep["total"], rep["active"], rep["inactive"]
-
-        res = []
-        for k, v in rep.items():
-            if not k.startswith("locked") or v == 0:
-                continue
-            res.append({"queue": k, "locked": v, "available": max(active - v, 0)})
-
-        res = sorted(res, key=lambda x: x["locked"], reverse=True)
-        print_table(res, hr_after=True)
-        print(f"Total: {total} - Active: {active} - Inactive: {inactive}")
-        return
-
-    if args.command == "add_accounts":
-        await pool.load_from_file(args.file_path, args.line_format)
-        print("\nNow run:\ntwscrape login_accounts")
-        return
-
-    if args.command == "del_accounts":
-        await pool.delete_accounts(args.usernames)
-        return
-
-    if args.command == "login_accounts":
-        stats = await pool.login_all()
-        print(stats)
-        return
-
-    if args.command == "relogin_failed":
-        await pool.relogin_failed()
-        return
-
-    if args.command == "relogin":
-        await pool.relogin(args.usernames)
-        return
-
-    if args.command == "reset_locks":
-        await pool.reset_locks()
-        return
-
-    if args.command == "delete_inactive":
-        await pool.delete_inactive()
-        return
-
-    fn = args.command + "_raw" if args.raw else args.command
-    fn = getattr(api, fn, None)
-    if fn is None:
-        logger.error(f"Unknown command: {args.command}")
-        raise SystemExit(1)
-
-    _, val = get_fn_arg(args)
-
-    if "limit" in args:
-        async for doc in fn(val, limit=args.limit):
-            print(to_str(doc))
-    else:
-        doc = await fn(val)
-        print(to_str(doc))
+    await _run_api_command(api, args)
 
 
 def custom_help(p):
@@ -140,7 +172,7 @@ def custom_help(p):
     print("\n".join(msg))
 
 
-def run():
+def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(add_help=False, formatter_class=CustomHelpFormatter)
     p.add_argument("--db", default="accounts.db", help="Accounts database file")
     p.add_argument("--debug", action="store_true", help="Enable debug mode")
@@ -198,6 +230,11 @@ def run():
     c_lim("list_timeline", "Get tweets from list", "list_id", "List ID", int)
     c_lim("trends", "Get trends", "trend_id", "Trend ID or name", str)
 
+    return p
+
+
+def run():
+    p = build_parser()
     args = p.parse_args()
     if args.command is None:
         return custom_help(p)
