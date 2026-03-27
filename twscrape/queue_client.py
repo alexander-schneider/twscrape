@@ -15,12 +15,16 @@ from .xclid import XClIdGen
 ReqParams = dict[str, str | int] | None
 TMP_TS = utc.now().isoformat().split(".")[0].replace("T", "_").replace(":", "-")[0:16]
 LOADSHED_COOLDOWN_SECONDS = 120
+TRANSPORT_ERROR_RETRY_LIMIT = 3
 
 
 class HandledError(Exception): ...
 
 
 class AbortReqError(Exception): ...
+
+
+class ApiFeatureUpdateRequiredError(Exception): ...
 
 
 class XClIdGenStore:
@@ -42,7 +46,7 @@ class XClIdGenStore:
                 await asyncio.sleep(1)
 
         raise AbortReqError(
-            "Faield to create XClIdGen. See: https://github.com/vladkens/twscrape/issues/248"
+            "Failed to create XClIdGen. See: https://github.com/alexander-schneider/twscrape/issues"
         )
 
 
@@ -79,7 +83,7 @@ class Ctx:
             await asyncio.sleep(1)
 
         raise AbortReqError(
-            "Faield to get XClIdGen. See: https://github.com/vladkens/twscrape/issues/248"
+            "Failed to get XClIdGen. See: https://github.com/alexander-schneider/twscrape/issues"
         )
 
 
@@ -201,8 +205,10 @@ class QueueClient:
 
         # for dev: need to add some features in api.py
         if err_msg.startswith("(336) The following features cannot be null"):
-            logger.error(f"[DEV] Update required: {err_msg}")
-            exit(1)
+            raise ApiFeatureUpdateRequiredError(
+                "X rejected the configured GraphQL feature flags. "
+                f"Update twscrape/api.py and retry. Details: {err_msg}"
+            )
 
         # general api rate limit
         if limit_remaining == 0 and limit_reset > 0:
@@ -284,7 +290,7 @@ class QueueClient:
         params: ReqParams = None,
         json: Any = None,
     ) -> Response | None:
-        unknown_retry, connection_retry = 0, 0
+        unknown_retry, transport_retry = 0, 0
 
         while True:
             ctx = await self._get_ctx()  # not need to close client, class implements __aexit__
@@ -297,28 +303,34 @@ class QueueClient:
                 await self._check_rep(rep)
 
                 ctx.req_count += 1  # count only successful
-                unknown_retry, connection_retry = 0, 0
+                unknown_retry, transport_retry = 0, 0
                 return rep
             except AbortReqError:
                 # abort all queries
                 return
+            except ApiFeatureUpdateRequiredError:
+                raise
             except HandledError:
                 # retry with new account
+                unknown_retry, transport_retry = 0, 0
                 continue
-            except (httpx.ReadTimeout, httpx.ProxyError):
+            except (
+                httpx.ReadTimeout,
+                httpx.ProxyError,
+                httpx.ConnectError,
+                httpx.ConnectTimeout,
+            ) as e:
                 # http transport failed, just retry with same account
-                continue
-            except (httpx.ConnectError, httpx.ConnectTimeout) as e:
-                # if proxy missconfigured or ???
-                connection_retry += 1
-                if connection_retry >= 3:
+                transport_retry += 1
+                if transport_retry >= TRANSPORT_ERROR_RETRY_LIMIT:
                     raise e
+                await asyncio.sleep(1)
             except Exception as e:
                 unknown_retry += 1
                 if unknown_retry >= 3:
                     msg = [
                         "Unknown error. Account timeouted for 15 minutes.",
-                        "Create issue please: https://github.com/vladkens/twscrape/issues",
+                        "Create issue please: https://github.com/alexander-schneider/twscrape/issues",
                         f"If it mistake, you can unlock accounts with `twscrape reset_locks`. Err: {type(e)}: {e}",
                     ]
 

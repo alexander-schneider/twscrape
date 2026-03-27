@@ -36,6 +36,61 @@ async def test_add_accounts(pool_mock: AccountsPool):
     assert acc.email_password == "email_pass2"
 
 
+async def test_delete_accounts_handles_special_username(pool_mock: AccountsPool):
+    username = 'bad"name'
+    await pool_mock.add_account(username, "pass1", "email1", "email_pass1")
+
+    await pool_mock.delete_accounts([username])
+
+    assert await pool_mock.get_account(username) is None
+
+
+async def test_login_all_handles_special_username(pool_mock: AccountsPool, monkeypatch):
+    username = 'bad"name'
+    await pool_mock.add_account(username, "pass1", "email1", "email_pass1")
+
+    seen: list[str] = []
+
+    async def fake_login(account):
+        seen.append(account.username)
+        return True
+
+    monkeypatch.setattr(pool_mock, "login", fake_login)
+
+    stats = await pool_mock.login_all([username])
+
+    assert stats == {"total": 1, "success": 1, "failed": 0}
+    assert seen == [username]
+
+
+async def test_relogin_handles_special_username(pool_mock: AccountsPool, monkeypatch):
+    username = 'bad"name'
+    await pool_mock.add_account(username, "pass1", "email1", "email_pass1")
+    await pool_mock.set_active(username, True)
+
+    acc = await pool_mock.get(username)
+    acc.headers = {"authorization": "Bearer test"}
+    acc.cookies = {"ct0": "token"}
+    await pool_mock.save(acc)
+
+    relogin_calls: list[list[str]] = []
+
+    async def fake_login_all(usernames):
+        relogin_calls.append(usernames)
+        return {"total": len(usernames), "success": 0, "failed": 0}
+
+    monkeypatch.setattr(pool_mock, "login_all", fake_login_all)
+
+    await pool_mock.relogin([username])
+
+    acc = await pool_mock.get(username)
+    assert acc.active is False
+    assert acc.headers == {}
+    assert acc.cookies == {}
+    assert acc.error_msg is None
+    assert relogin_calls == [[username]]
+
+
 async def test_get_all(pool_mock: AccountsPool):
     # should return empty list
     accs = await pool_mock.get_all()
