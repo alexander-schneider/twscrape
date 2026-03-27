@@ -14,6 +14,7 @@ from .db import get_sqlite_version
 from .logger import logger, set_log_level
 from .login import LoginConfig
 from .models import Tweet, User
+from .queue_client import ApiFeatureUpdateRequiredError
 from .utils import print_table
 
 
@@ -29,7 +30,7 @@ def get_fn_arg(args):
             return name, getattr(args, name)
 
     logger.error(f"Missing argument: {names}")
-    exit(1)
+    raise SystemExit(1)
 
 
 def to_str(doc: httpx.Response | Tweet | User | None) -> str:
@@ -106,7 +107,7 @@ async def main(args):
     fn = getattr(api, fn, None)
     if fn is None:
         logger.error(f"Unknown command: {args.command}")
-        exit(1)
+        raise SystemExit(1)
 
     _, val = get_fn_arg(args)
 
@@ -203,5 +204,8 @@ def run():
 
     try:
         asyncio.run(main(args))
+    except ApiFeatureUpdateRequiredError as e:
+        logger.error(str(e))
+        raise SystemExit(1)
     except KeyboardInterrupt:
         pass

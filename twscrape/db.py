@@ -1,7 +1,6 @@
 import asyncio
 import random
 import sqlite3
-from collections import defaultdict
 
 import aiosqlite
 
@@ -105,9 +104,6 @@ async def migrate(db: aiosqlite.Connection):
 
 
 class DB:
-    _init_queries: defaultdict[str, list[str]] = defaultdict(list)
-    _init_once: defaultdict[str, bool] = defaultdict(bool)
-
     def __init__(self, db_path):
         self.db_path = db_path
         self.conn = None
@@ -116,10 +112,7 @@ class DB:
         await check_version()
         db = await aiosqlite.connect(self.db_path)
         db.row_factory = aiosqlite.Row
-
-        if not self._init_once[self.db_path]:
-            await migrate(db)
-            self._init_once[self.db_path] = True
+        await migrate(db)
 
         self.conn = db
         return db

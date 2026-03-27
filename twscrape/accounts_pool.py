@@ -49,6 +49,16 @@ class AccountsPool:
         self._login_config = login_config or LoginConfig()
         self._raise_when_no_account = raise_when_no_account
 
+    def _usernames_where(self, usernames: list[str]) -> tuple[str, dict[str, str]]:
+        placeholders = []
+        params: dict[str, str] = {}
+        for idx, username in enumerate(dict.fromkeys(usernames)):
+            key = f"username_{idx}"
+            placeholders.append(f":{key}")
+            params[key] = username
+
+        return ",".join(placeholders), params
+
     async def load_from_file(self, filepath: str, line_format: str):
         line_delim = guess_delim(line_format)
         tokens = line_format.split(line_delim)
@@ -119,8 +129,9 @@ class AccountsPool:
             logger.warning("No usernames provided")
             return
 
-        qs = f"""DELETE FROM accounts WHERE username IN ({",".join([f'"{x}"' for x in usernames])})"""
-        await execute(self._db_file, qs)
+        placeholders, params = self._usernames_where(usernames)
+        qs = f"DELETE FROM accounts WHERE username IN ({placeholders})"
+        await execute(self._db_file, qs, params)
 
     async def delete_inactive(self):
         qs = "DELETE FROM accounts WHERE active = false"
@@ -171,13 +182,17 @@ class AccountsPool:
             await self.save(account)
 
     async def login_all(self, usernames: list[str] | None = None):
+        params = None
         if usernames is None:
             qs = "SELECT * FROM accounts WHERE active = false AND error_msg IS NULL"
         else:
-            us = ",".join([f'"{x}"' for x in usernames])
-            qs = f"SELECT * FROM accounts WHERE username IN ({us})"
+            if not usernames:
+                return {"total": 0, "success": 0, "failed": 0}
 
-        rs = await fetchall(self._db_file, qs)
+            placeholders, params = self._usernames_where(usernames)
+            qs = f"SELECT * FROM accounts WHERE username IN ({placeholders})"
+
+        rs = await fetchall(self._db_file, qs, params)
         accounts = [Account.from_rs(rs) for rs in rs]
         # await asyncio.gather(*[login(x) for x in self.accounts])
 
@@ -195,6 +210,8 @@ class AccountsPool:
             logger.warning("No usernames provided")
             return
 
+        placeholders, params = self._usernames_where(usernames)
+        params["user_agent"] = UserAgent().safari
         qs = f"""
         UPDATE accounts SET
             active = false,
@@ -203,11 +220,11 @@ class AccountsPool:
             error_msg = NULL,
             headers = json_object(),
             cookies = json_object(),
-            user_agent = "{UserAgent().safari}"
-        WHERE username IN ({",".join([f'"{x}"' for x in usernames])})
+            user_agent = :user_agent
+        WHERE username IN ({placeholders})
         """
 
-        await execute(self._db_file, qs)
+        await execute(self._db_file, qs, params)
         await self.login_all(usernames)
 
     async def relogin_failed(self):

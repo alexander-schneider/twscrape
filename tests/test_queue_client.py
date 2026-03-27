@@ -1,10 +1,11 @@
 from contextlib import aclosing
 
 import httpx
+import pytest
 from pytest_httpx import HTTPXMock
 
 from twscrape.accounts_pool import GLOBAL_LOCK_QUEUE, AccountsPool
-from twscrape.queue_client import QueueClient
+from twscrape.queue_client import ApiFeatureUpdateRequiredError, QueueClient
 
 DB_FILE = "/tmp/twscrape_test_queue_client.db"
 URL = "https://example.com/api"
@@ -115,6 +116,41 @@ async def test_retry_with_same_acc_on_network_error(httpx_mock: HTTPXMock, clien
     # check username added to request obj (for logging)
     username = getattr(rep, "__username", None)
     assert username is not None
+
+
+async def test_transport_errors_raise_after_retry_limit(httpx_mock: HTTPXMock, client_fixture: CF):
+    pool, client = client_fixture
+
+    async with client:
+        for _ in range(3):
+            httpx_mock.add_exception(httpx.ReadTimeout("Unable to read within timeout"))
+
+        with pytest.raises(httpx.ReadTimeout):
+            await client.get(URL)
+
+    locked = await get_locked(pool)
+    assert len(locked) == 0
+
+
+async def test_feature_flag_mismatch_raises_typed_error(httpx_mock: HTTPXMock, client_fixture: CF):
+    pool, client = client_fixture
+
+    async with client:
+        httpx_mock.add_response(
+            url=URL,
+            json={
+                "errors": [
+                    {"code": 336, "message": "The following features cannot be null: feature_a"}
+                ]
+            },
+            status_code=400,
+        )
+
+        with pytest.raises(ApiFeatureUpdateRequiredError):
+            await client.get(URL)
+
+    locked = await get_locked(pool)
+    assert len(locked) == 0
 
 
 async def test_loadshed_globally_cools_account_and_switches_queue(
