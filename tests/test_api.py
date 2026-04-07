@@ -151,6 +151,60 @@ async def test_gql_items_stops_on_repeated_search_page(api_mock: API, monkeypatc
     assert all(x[0] == "post" for x in calls)
 
 
+@pytest.mark.parametrize(
+    ("op", "variables"),
+    [
+        (
+            api_module.OP_SearchTimeline,
+            {"rawQuery": "foo", "count": 20, "product": "Latest", "querySource": "typed_query"},
+        ),
+        (
+            api_module.OP_Followers,
+            {"userId": "2244994945", "count": 20, "includePromotedContent": False},
+        ),
+        (
+            api_module.OP_UserTweetsAndReplies,
+            {
+                "userId": "2244994945",
+                "count": 40,
+                "includePromotedContent": True,
+                "withCommunity": True,
+                "withVoice": True,
+                "withV2Timeline": True,
+            },
+        ),
+    ],
+)
+async def test_gql_items_uses_post_for_selected_timeline_ops(api_mock: API, monkeypatch, op, variables):
+    calls = []
+
+    class FakeQueueClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            return None
+
+        async def get(self, url, params=None):
+            calls.append(("get", url, params))
+            raise AssertionError(f"{op} should use POST")
+
+        async def post(self, url, json=None):
+            calls.append(("post", url, json))
+            return DummyResponse(make_search_page(["tweet-1"], None))
+
+    monkeypatch.setattr(api_module, "QueueClient", FakeQueueClient)
+
+    reps = await gather(api_mock._gql_items(op, variables, limit=1))
+
+    assert len(reps) == 1
+    assert calls
+    assert all(x[0] == "post" for x in calls)
+
+
 async def test_search_deduplicates_across_pages(api_mock: API, monkeypatch):
     expected_ids = [x.id for x in api_module.parse_tweets(load_raw_search())]
 

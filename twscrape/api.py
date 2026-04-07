@@ -14,11 +14,11 @@ OP_SearchTimeline = "rkp6b4vtR9u7v3naGoOzUQ/SearchTimeline"
 OP_UserByRestId = "VQfQ9wwYdk6j_u2O4vt64Q/UserByRestId"
 OP_UserByScreenName = "IGgvgiOx4QZndDHuD3x9TQ/UserByScreenName"
 OP_TweetDetail = "xIYgDwjboktoFeXe_fgacw/TweetDetail"
-OP_Followers = "Enf9DNUZYiT037aersI5gg/Followers"
+OP_Followers = "-WcGoRt8IQuPm-l1ymgy6g/Followers"
 OP_Following = "ntIPnH1WMBKW--4Tn1q71A/Following"
 OP_Retweeters = "i-CI8t2pJD15euZJErEDrg/Retweeters"
 OP_UserTweets = "O0epvwaQPUx-bT9YlqlL6w/UserTweets"
-OP_UserTweetsAndReplies = "zedqO5hg41Ox6UeAKsWWzA/UserTweetsAndReplies"
+OP_UserTweetsAndReplies = "Yt1JzwcBsBWYEEi3jMTe2Q/UserTweetsAndReplies"
 OP_ListLatestTweetsTimeline = "fb_6wmHD2dk9D-xYXOQlgw/ListLatestTweetsTimeline"
 OP_BlueVerifiedFollowers = "4zBtcnE_c0v8wn1Zx0yF5Q/BlueVerifiedFollowers"
 OP_UserCreatorSubscriptions = "Xe0o9ZDBW6UjJTfFn0pdLQ/UserCreatorSubscriptions"
@@ -176,7 +176,7 @@ class API:
                 if queue in ("UserMedia",):
                     params["fieldToggles"] = {"withArticlePlainText": False}
 
-                if queue == "SearchTimeline":
+                if queue in ("SearchTimeline", "Followers", "UserTweetsAndReplies"):
                     rep = await client.post(f"{GQL_URL}/{op}", json=params)
                 else:
                     rep = await client.get(f"{GQL_URL}/{op}", params=encode_params(params))
