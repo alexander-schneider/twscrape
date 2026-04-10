@@ -262,6 +262,26 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
+### Handling transient search interruptions
+
+Search requests can occasionally fail with a transient X-side
+`ServiceUnavailable` response even when the account is still healthy. The fork
+exposes this as a typed `ServiceUnavailableError` so callers can retry that path
+without conflating it with generic API drift or account bans.
+
+```python
+from twscrape import API, ServiceUnavailableError, gather
+
+async def resilient_search():
+    api = API()
+
+    try:
+        return await gather(api.search("$NVDA lang:en", limit=20))
+    except ServiceUnavailableError:
+        # Retry once, back off, or keep already-collected partials in your app.
+        return []
+```
+
 ### Stopping iteration with break
 
 In order to correctly release an account in case of `break` in a loop, a special syntax must be used. Otherwise, Python's event loop will release the lock on the account sometime in the future. See explanation [here](https://github.com/vladkens/twscrape/issues/27#issuecomment-1623395424).
