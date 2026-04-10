@@ -725,8 +725,9 @@ def _get_reply_user(tw_obj: dict, res: dict):
 
 def _get_tweet_user_obj(tw_obj: dict, res: dict) -> dict:
     user_id = tw_obj.get("user_id_str", None)
-    if user_id is not None and user_id in res["users"]:
-        return res["users"][user_id]
+    users = res.get("users", {})
+    if user_id is not None and user_id in users:
+        return users[user_id]
 
     for path in (
         "core.user_results.result",
