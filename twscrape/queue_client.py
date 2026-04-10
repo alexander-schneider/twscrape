@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import re
 from typing import Any
 from urllib.parse import urlparse
 
@@ -31,6 +32,12 @@ class ApiFeatureUpdateRequiredError(Exception): ...
 class UnexpectedApiError(Exception): ...
 
 
+class ServiceUnavailableError(UnexpectedApiError): ...
+
+
+SERVICE_UNAVAILABLE_RE = re.compile(r"(?:^|; )\(-1\) ServiceUnavailable(?:\b|:)")
+
+
 def is_html_edge_block(rep: Response, res: Any) -> bool:
     if rep.status_code != 403:
         return False
@@ -44,6 +51,10 @@ def is_html_edge_block(rep: Response, res: Any) -> bool:
     return "text/html" in content_type and (
         "cloudflare" in raw_lower or "attention required" in raw_lower or "<html" in raw_lower
     )
+
+
+def is_service_unavailable_error(err_msg: str) -> bool:
+    return SERVICE_UNAVAILABLE_RE.search(err_msg) is not None
 
 
 class XClIdGenStore:
@@ -295,6 +306,12 @@ class QueueClient:
             raise HandledError()
 
         if err_msg != "OK":
+            if is_service_unavailable_error(err_msg):
+                logger.warning(f"ServiceUnavailable detected: {log_msg}")
+                raise ServiceUnavailableError(
+                    f"Unhandled X API error ({rep.status_code}) for {self.queue}: {err_msg}"
+                )
+
             logger.error(f"API unknown error: {log_msg}")
             await self._close_ctx(utc.ts() + UNKNOWN_API_ERROR_COOLDOWN_SECONDS)
             raise UnexpectedApiError(

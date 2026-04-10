@@ -175,7 +175,9 @@ async def test_gql_items_stops_on_repeated_search_page(api_mock: API, monkeypatc
         ),
     ],
 )
-async def test_gql_items_uses_post_for_selected_timeline_ops(api_mock: API, monkeypatch, op, variables):
+async def test_gql_items_uses_post_for_selected_timeline_ops(
+    api_mock: API, monkeypatch, op, variables
+):
     calls = []
 
     class FakeQueueClient:
