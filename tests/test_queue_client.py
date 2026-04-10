@@ -8,6 +8,7 @@ from twscrape.accounts_pool import GLOBAL_LOCK_QUEUE, AccountsPool
 from twscrape.queue_client import (
     ApiFeatureUpdateRequiredError,
     QueueClient,
+    ServiceUnavailableError,
     UnexpectedApiError,
 )
 
@@ -215,6 +216,31 @@ async def test_unknown_api_errors_fail_closed_and_cool_account(
     assert rep is not None
     assert rep.json() == {"foo": "ok"}
     assert getattr(rep, "__username", None) == "user2"
+
+
+async def test_service_unavailable_raises_typed_error_without_cooling_account(
+    httpx_mock: HTTPXMock, client_fixture: CF
+):
+    pool, client = client_fixture
+
+    await client.__aenter__()
+    assert client.ctx is not None
+    assert client.ctx.acc.username == "user1"
+
+    httpx_mock.add_response(
+        url=URL,
+        json={"errors": [{"code": -1, "message": "ServiceUnavailable: Unspecified"}]},
+        status_code=200,
+    )
+
+    with pytest.raises(ServiceUnavailableError, match="ServiceUnavailable"):
+        await client.get(URL)
+
+    assert client.ctx is not None
+    assert client.ctx.acc.username == "user1"
+
+    user1 = await pool.get("user1")
+    assert "SearchTimeline" in user1.locks
 
 
 async def test_html_403_cools_only_the_current_queue(httpx_mock: HTTPXMock, client_fixture: CF):

@@ -609,3 +609,22 @@ def test_parse_tweets_aborts_after_too_many_item_failures(tmp_path, monkeypatch)
 
     dumps = sorted(tmp_path.iterdir())
     assert len(dumps) == 2
+
+
+def test_parse_tweets_falls_back_to_embedded_author_when_users_map_is_missing(monkeypatch):
+    raw = fake_rep("raw_search").json()
+    old = models_module.to_old_rep(raw)
+
+    tweet_id, tweet_obj = next(iter(old["tweets"].items()))
+    user_id = tweet_obj["user_id_str"]
+    old["tweets"] = {tweet_id: tweet_obj}
+    old["users"] = {}
+
+    monkeypatch.setattr("twscrape.models.to_old_rep", lambda rep: old)
+
+    docs = list(parse_tweets(raw))
+
+    assert len(docs) == 1
+    doc = docs[0]
+    assert doc.user.id_str == user_id
+    assert doc.user.username == "PengellySt72806"
