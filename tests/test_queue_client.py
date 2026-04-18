@@ -10,6 +10,7 @@ from twscrape.queue_client import (
     QueueClient,
     ServiceUnavailableError,
     UnexpectedApiError,
+    is_transient_api_error,
 )
 
 DB_FILE = "/tmp/twscrape_test_queue_client.db"
@@ -235,6 +236,56 @@ async def test_service_unavailable_raises_typed_error_without_cooling_account(
 
     with pytest.raises(ServiceUnavailableError, match="ServiceUnavailable"):
         await client.get(URL)
+
+    assert client.ctx is not None
+    assert client.ctx.acc.username == "user1"
+
+    user1 = await pool.get("user1")
+    assert "SearchTimeline" in user1.locks
+
+
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        ("(-1) ServiceUnavailable: Unspecified", True),
+        ("(-1) Internal server error", True),
+        ("(29) Timeout: Unspecified", True),
+        ("(999) New safety gate required; (-1) Internal server error", True),
+        ("(-1) Internal server error; (999) New safety gate required", True),
+        ("(999) New safety gate required", False),
+    ],
+)
+def test_transient_api_error_detection(message: str, expected: bool):
+    assert is_transient_api_error(message) is expected
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        {"code": -1, "message": "Internal server error"},
+        {"code": 29, "message": "Timeout: Unspecified"},
+    ],
+)
+async def test_transient_x_api_errors_raise_typed_error_without_cooling_account(
+    error: dict[str, int | str],
+    httpx_mock: HTTPXMock,
+    client_fixture: CF,
+):
+    pool, client = client_fixture
+
+    await client.__aenter__()
+    assert client.ctx is not None
+    assert client.ctx.acc.username == "user1"
+
+    httpx_mock.add_response(
+        url=URL,
+        json={"errors": [error]},
+        status_code=200,
+    )
+
+    with pytest.raises(ServiceUnavailableError, match=str(error["message"])) as exc_info:
+        await client.get(URL)
+    assert str(exc_info.value).startswith("Transient X API error")
 
     assert client.ctx is not None
     assert client.ctx.acc.username == "user1"

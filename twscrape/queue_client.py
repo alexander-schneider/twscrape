@@ -1,7 +1,6 @@
 import asyncio
 import json
 import os
-import re
 from typing import Any
 from urllib.parse import urlparse
 
@@ -35,7 +34,11 @@ class UnexpectedApiError(Exception): ...
 class ServiceUnavailableError(UnexpectedApiError): ...
 
 
-SERVICE_UNAVAILABLE_RE = re.compile(r"(?:^|; )\(-1\) ServiceUnavailable(?:\b|:)")
+TRANSIENT_API_ERROR_FRAGMENTS = (
+    "(-1) ServiceUnavailable",
+    "(-1) Internal server error",
+    "(29) Timeout: Unspecified",
+)
 
 
 def is_html_edge_block(rep: Response, res: Any) -> bool:
@@ -53,8 +56,8 @@ def is_html_edge_block(rep: Response, res: Any) -> bool:
     )
 
 
-def is_service_unavailable_error(err_msg: str) -> bool:
-    return SERVICE_UNAVAILABLE_RE.search(err_msg) is not None
+def is_transient_api_error(err_msg: str) -> bool:
+    return any(fragment in err_msg for fragment in TRANSIENT_API_ERROR_FRAGMENTS)
 
 
 class XClIdGenStore:
@@ -306,10 +309,10 @@ class QueueClient:
             raise HandledError()
 
         if err_msg != "OK":
-            if is_service_unavailable_error(err_msg):
-                logger.warning(f"ServiceUnavailable detected: {log_msg}")
+            if is_transient_api_error(err_msg):
+                logger.warning(f"Transient X API error detected: {log_msg}")
                 raise ServiceUnavailableError(
-                    f"Unhandled X API error ({rep.status_code}) for {self.queue}: {err_msg}"
+                    f"Transient X API error ({rep.status_code}) for {self.queue}: {err_msg}"
                 )
 
             logger.error(f"API unknown error: {log_msg}")

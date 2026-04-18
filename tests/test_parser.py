@@ -591,6 +591,59 @@ async def test_cards():
     assert doc.card.url is not None
 
 
+def test_poll_choice_images_card_is_parsed_as_poll_card():
+    card = models_module._parse_card(
+        {
+            "card": {
+                "legacy": {
+                    "name": "1906814671912599552:poll_choice_images",
+                    "binding_values": [
+                        {
+                            "key": "choice1_label",
+                            "value": {"type": "STRING", "string_value": "Bullish"},
+                        },
+                        {
+                            "key": "choice1_count",
+                            "value": {"type": "STRING", "string_value": "12"},
+                        },
+                        {
+                            "key": "choice2_label",
+                            "value": {"type": "STRING", "string_value": "Bearish"},
+                        },
+                        {
+                            "key": "choice2_count",
+                            "value": {"type": "STRING", "string_value": "8"},
+                        },
+                        {
+                            "key": "counts_are_final",
+                            "value": {"type": "BOOLEAN", "boolean_value": False},
+                        },
+                        {
+                            "key": "choice1_image",
+                            "value": {
+                                "type": "IMAGE",
+                                "image_value": {
+                                    "height": 120,
+                                    "width": 120,
+                                    "url": "https://example.com/bullish.jpg",
+                                },
+                            },
+                        },
+                    ],
+                }
+            }
+        },
+        "https://x.com/StockSandbox/status/2045183670500401612",
+    )
+
+    assert isinstance(card, PollCard)
+    assert card.finished is False
+    assert [(option.label, option.votesCount) for option in card.options] == [
+        ("Bullish", 12),
+        ("Bearish", 8),
+    ]
+
+
 def test_parse_tweets_aborts_after_too_many_item_failures(tmp_path, monkeypatch):
     tweets = {str(idx): {"id": idx} for idx in range(4)}
 
