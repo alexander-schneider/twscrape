@@ -608,6 +608,10 @@ def _parse_card_prepare_values(obj: dict):
     return values
 
 
+def _is_poll_card_name(name: str) -> bool:
+    return re.fullmatch(r"(?:\d+:)?poll(?:\d+choice_text_only|_choice_images)", name) is not None
+
+
 def _parse_card(obj: dict, url: str):
     name = get_or(obj, "card.legacy.name", None)
     if not name:
@@ -658,7 +662,7 @@ def _parse_card(obj: dict, url: str):
             video=video,
         )
 
-    if re.match(r"poll\d+choice_text_only", name):
+    if _is_poll_card_name(name):
         val = _parse_card_prepare_values(obj)
 
         options = []

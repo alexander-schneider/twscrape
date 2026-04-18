@@ -264,9 +264,10 @@ if __name__ == "__main__":
 
 ### Handling transient search interruptions
 
-Search requests can occasionally fail with a transient X-side
-`ServiceUnavailable` response even when the account is still healthy. The fork
-exposes this as a typed `ServiceUnavailableError` so callers can retry that path
+Search requests can occasionally fail with transient X-side GraphQL errors even
+when the account is still healthy. The fork exposes known temporary failures
+such as `ServiceUnavailable`, `Internal server error`, and
+`Timeout: Unspecified` as a typed `ServiceUnavailableError` so callers can retry that path
 without conflating it with generic API drift or account bans.
 
 ```python
