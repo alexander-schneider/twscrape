@@ -104,6 +104,22 @@ def _parse_current_html_scripts(text: str):
             yield normalized
 
 
+def _parse_chunk_map_scripts(text: str):
+    hash_map = {m.group(1): m.group(2) for m in re.finditer(r'(\d+):"([0-9a-f]{7})"', text)}
+    if not hash_map:
+        return
+
+    name_map: dict[str, str] = {}
+    for match in re.finditer(r'(\d+):"([^"]+)"', text):
+        value = match.group(2)
+        if not re.fullmatch(r"[0-9a-f]{7}", value):
+            name_map[match.group(1)] = value
+
+    for chunk_id, name in name_map.items():
+        if hash_value := hash_map.get(chunk_id):
+            yield script_url(name, f"{hash_value}a")
+
+
 def get_scripts_list(text: str):
     marker = 'e=>e+"."+'
     suffix = '[e]+"a.js"'
@@ -116,6 +132,12 @@ def get_scripts_list(text: str):
             pass
 
     urls = list(_parse_current_html_scripts(text))
+    seen = set(urls)
+    for url in _parse_chunk_map_scripts(text):
+        if url not in seen:
+            urls.append(url)
+            seen.add(url)
+
     if urls:
         yield from urls
         return
