@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.19.4 - 2026-05-20
+
+### Fixed
+
+- Resolve X client transaction ID script URLs from numeric chunk name/hash maps
+  when `ondemand.s` is no longer exposed as a direct mapping.
+
 ## v0.19.3 - 2026-04-18
 
 ### Fixed
