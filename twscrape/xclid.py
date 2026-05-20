@@ -105,18 +105,15 @@ def _parse_current_html_scripts(text: str):
 
 
 def _parse_chunk_map_scripts(text: str):
-    hash_map = {m.group(1): m.group(2) for m in re.finditer(r'(\d+):"([0-9a-f]{7})"', text)}
-    if not hash_map:
-        return
-
-    name_map: dict[str, str] = {}
+    mappings: dict[str, list[str]] = {}
     for match in re.finditer(r'(\d+):"([^"]+)"', text):
-        value = match.group(2)
-        if not re.fullmatch(r"[0-9a-f]{7}", value):
-            name_map[match.group(1)] = value
+        chunk_id, value = match.groups()
+        mappings.setdefault(chunk_id, []).append(value)
 
-    for chunk_id, name in name_map.items():
-        if hash_value := hash_map.get(chunk_id):
+    for values in mappings.values():
+        name = next((x for x in values if not re.fullmatch(r"[0-9a-f]{7,}", x)), None)
+        hash_value = next((x for x in values if re.fullmatch(r"[0-9a-f]{7,}", x)), None)
+        if name and hash_value:
             yield script_url(name, f"{hash_value}a")
 
 

@@ -73,7 +73,7 @@ def test_get_scripts_list_chunk_name_and_hash_maps():
       </head>
       <body>
         <script>
-          _.u=e=>(({59924:"ondemand.s",57051:"i18n/en"})[e]||e)+"."+({59924:"7442010",57051:"3ad60a5"})[e]+"a.js";
+          _.u=e=>(({59924:"ondemand.s",57051:"i18n/en"})[e]||e)+"."+({59924:"7442010b",57051:"3ad60a5"})[e]+"a.js";
         </script>
       </body>
     </html>
@@ -82,7 +82,7 @@ def test_get_scripts_list_chunk_name_and_hash_maps():
     scripts = list(get_scripts_list(html))
 
     assert "https://abs.twimg.com/responsive-web/client-web/main.be0febaa.js" in scripts
-    assert "https://abs.twimg.com/responsive-web/client-web/ondemand.s.7442010a.js" in scripts
+    assert "https://abs.twimg.com/responsive-web/client-web/ondemand.s.7442010ba.js" in scripts
     assert "https://abs.twimg.com/responsive-web/client-web/i18n/en.3ad60a5a.js" in scripts
 
 
