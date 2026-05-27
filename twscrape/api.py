@@ -112,12 +112,14 @@ class API:
         return None
 
     def _get_entries(self, obj: dict) -> list[dict]:
-        entries = get_by_path(obj, "entries") or []
+        entries = get_by_path(obj, "entries") or get_by_path(obj, "items_results") or []
         return [
             x
             for x in entries
             if not (
-                x["entryId"].startswith("cursor-") or x["entryId"].startswith("messageprompt-")
+                x["entryId"].startswith(
+                    ("cursor-", "messageprompt-", "module-", "who-to-follow-")
+                )
             )
         ]
 
@@ -165,6 +167,7 @@ class API:
         kv, ft = {**kv}, {**GQL_FEATURES, **(ft or {})}
         seen_cursors: set[str] = set()
         seen_pages: set[tuple[str, ...]] = set()
+        empty_pages = 0
 
         async with QueueClient(self.pool, queue, self.debug, proxy=self.proxy) as client:
             while active:
@@ -195,8 +198,16 @@ class API:
 
                 rep, cnt, active = self._is_end(rep, queue, els, cur, cnt, limit)
                 if rep is None:
+                    # Cursor exists, so data may follow after an empty or fully filtered page.
+                    if cur is not None:
+                        empty_pages += 1
+                        if empty_pages >= 3:
+                            logger.debug(f"{queue} - {empty_pages} empty pages in a row, stopping")
+                            return
+                        continue
                     return
 
+                empty_pages = 0
                 yield rep
 
     async def _gql_item(

@@ -151,6 +151,47 @@ async def test_gql_items_stops_on_repeated_search_page(api_mock: API, monkeypatc
     assert all(x[0] == "post" for x in calls)
 
 
+async def test_gql_items_continues_past_empty_search_pages(api_mock: API, monkeypatch):
+    pages = [
+        DummyResponse(make_search_page([], "cursor-1")),
+        DummyResponse(make_search_page(["tweet-1", "tweet-2"], None)),
+    ]
+    calls = []
+
+    class FakeQueueClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            return None
+
+        async def get(self, url, params=None):
+            calls.append(("get", url, params))
+            raise AssertionError("SearchTimeline should use POST")
+
+        async def post(self, url, json=None):
+            calls.append(("post", url, json))
+            if not pages:
+                raise AssertionError("unexpected extra pagination request")
+            return pages.pop(0)
+
+    monkeypatch.setattr(api_module, "QueueClient", FakeQueueClient)
+
+    reps = await gather(
+        api_mock._gql_items(
+            api_module.OP_SearchTimeline,
+            {"rawQuery": "foo", "count": 20, "product": "Latest", "querySource": "typed_query"},
+        )
+    )
+
+    assert len(reps) == 1
+    assert len(calls) == 2
+    assert all(x[0] == "post" for x in calls)
+
+
 @pytest.mark.parametrize(
     ("op", "variables"),
     [
