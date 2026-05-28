@@ -124,33 +124,146 @@ def get_typed_object(obj: dict, res: defaultdict[str, list]):
     return res
 
 
+def _merge_legacy(base: dict, legacy) -> dict:
+    out = dict(base)
+    if isinstance(legacy, dict):
+        for key, value in legacy.items():
+            out.setdefault(key, value)
+    return out
+
+
+def _flatten_user_v2(obj: dict) -> dict:
+    flat = _merge_legacy(obj, obj.get("legacy"))
+    rest_id = obj.get("rest_id") or flat.get("rest_id") or flat.get("id_str")
+    flat["rest_id"] = rest_id
+    flat["id_str"] = str(rest_id) if rest_id is not None else str(flat.get("id_str") or "")
+    flat["id"] = int(rest_id) if rest_id is not None and str(rest_id).isdigit() else 0
+    flat["legacy"] = None
+
+    core = obj.get("core") or {}
+    if isinstance(core, dict):
+        for key in ("screen_name", "name", "created_at"):
+            if key not in flat and key in core:
+                flat[key] = core[key]
+
+    for key in ("avatar", "privacy", "verification", "profile_bio"):
+        if not isinstance(flat.get(key), dict):
+            flat[key] = {}
+
+    if not flat.get("profile_image_url_https"):
+        avatar = flat["avatar"]
+        if isinstance(avatar, dict):
+            avatar_url = avatar.get("image_url")
+            if avatar_url:
+                flat["profile_image_url_https"] = avatar_url
+
+    if not flat.get("location"):
+        location_obj = obj.get("location")
+        if isinstance(location_obj, dict):
+            location = location_obj.get("location")
+            if location is not None:
+                flat["location"] = location
+        elif location_obj is not None and not isinstance(location_obj, str):
+            flat["location"] = ""
+    elif not isinstance(flat.get("location"), (dict, str)):
+        flat["location"] = ""
+
+    if "protected" not in flat:
+        protected = flat["privacy"].get("protected")
+        if protected is not None:
+            flat["protected"] = protected
+
+    if "verified" not in flat:
+        verified = flat["verification"].get("verified")
+        if verified is not None:
+            flat["verified"] = verified
+
+    if "verified_type" not in flat:
+        verified_type = flat["verification"].get("verified_type")
+        if verified_type is not None:
+            flat["verified_type"] = verified_type
+
+    if "is_blue_verified" not in flat and "is_blue_verified" in obj:
+        flat["is_blue_verified"] = obj["is_blue_verified"]
+
+    if not flat.get("description"):
+        description = flat["profile_bio"].get("description")
+        if description is not None:
+            flat["description"] = description
+
+    flat.setdefault("description", "")
+    flat.setdefault("location", "")
+    flat.setdefault("followers_count", 0)
+    flat.setdefault("friends_count", 0)
+    flat.setdefault("statuses_count", 0)
+    flat.setdefault("favourites_count", 0)
+    flat.setdefault("listed_count", 0)
+    flat.setdefault("media_count", 0)
+    flat.setdefault("profile_image_url_https", "")
+    flat.setdefault("entities", {})
+    flat.setdefault("pinned_tweet_ids_str", [])
+    return flat
+
+
+def _flatten_tweet_v2(obj: dict) -> dict:
+    flat = _merge_legacy(obj, obj.get("legacy"))
+    rest_id = obj.get("rest_id") or flat.get("rest_id") or flat.get("id_str")
+    flat["rest_id"] = rest_id
+    flat["id_str"] = str(rest_id) if rest_id is not None else str(flat.get("id_str") or "")
+    flat["id"] = int(rest_id) if rest_id is not None and str(rest_id).isdigit() else 0
+    flat["legacy"] = None
+    if "source" not in flat and "source" in obj:
+        flat["source"] = obj["source"]
+    flat.setdefault("full_text", "")
+    flat.setdefault("lang", "")
+    flat.setdefault("reply_count", 0)
+    flat.setdefault("retweet_count", 0)
+    flat.setdefault("favorite_count", 0)
+    flat.setdefault("quote_count", 0)
+    flat.setdefault("bookmark_count", 0)
+    flat.setdefault("entities", {})
+    flat.setdefault("conversation_id_str", flat["id_str"])
+    return flat
+
+
 def to_old_obj(obj: dict):
-    return {
-        **obj,
-        **obj["legacy"],
-        "id_str": str(obj["rest_id"]),
-        "id": int(obj["rest_id"]),
-        "legacy": None,
-    }
+    if not isinstance(obj, dict):
+        return obj
+    if obj.get("__typename") == "User":
+        return _flatten_user_v2(obj)
+    return _flatten_tweet_v2(obj)
 
 
 def to_old_rep(obj: dict) -> dict[str, dict]:
     tmp = get_typed_object(obj, defaultdict(list))
 
-    tw1 = [x for x in tmp.get("Tweet", []) if "legacy" in x]
-    tw1 = {str(x["rest_id"]): to_old_obj(x) for x in tw1}
+    tweets = {}
+    for x in tmp.get("Tweet", []):
+        if "legacy" not in x:
+            continue
+        tweet = to_old_obj(x)
+        if tweet.get("id_str"):
+            tweets[str(tweet["id_str"])] = tweet
 
     # https://github.com/vladkens/twscrape/issues/53
     tw2 = [x["tweet"] for x in tmp.get("TweetWithVisibilityResults", []) if "legacy" in x["tweet"]]
-    tw2 = {str(x["rest_id"]): to_old_obj(x) for x in tw2}
+    for x in tw2:
+        tweet = to_old_obj(x)
+        if tweet.get("id_str"):
+            tweets[str(tweet["id_str"])] = tweet
 
-    users = [x for x in tmp.get("User", []) if "legacy" in x and "id" in x]
-    users = {str(x["rest_id"]): to_old_obj(x) for x in users}
+    users = {}
+    for x in tmp.get("User", []):
+        if "legacy" not in x or not (x.get("rest_id") or x.get("id_str")):
+            continue
+        user = to_old_obj(x)
+        if user.get("id_str"):
+            users[str(user["id_str"])] = user
 
     trends = [x for x in tmp.get("TimelineTrend", [])]
     trends = {x["name"]: x for x in trends}
 
-    return {"tweets": {**tw1, **tw2}, "users": users, "trends": trends}
+    return {"tweets": tweets, "users": users, "trends": trends}
 
 
 def print_table(rows: list[dict], hr_after=False):
