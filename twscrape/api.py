@@ -116,10 +116,9 @@ class API:
         return [
             x
             for x in entries
-            if not (
-                x["entryId"].startswith(
-                    ("cursor-", "messageprompt-", "module-", "who-to-follow-")
-                )
+            if isinstance(x, dict)
+            and not str(x.get("entryId", "")).startswith(
+                ("cursor-", "messageprompt-", "module-", "who-to-follow-")
             )
         ]
 
@@ -133,7 +132,7 @@ class API:
         if cursor is not None and cursor in seen_cursors:
             return True
 
-        page_key = tuple(x["entryId"] for x in entries)
+        page_key = tuple(str(x.get("entryId")) for x in entries if x.get("entryId") is not None)
         if page_key and page_key in seen_pages:
             return True
 

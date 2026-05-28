@@ -109,6 +109,28 @@ async def test_raise_when_no_account(api_mock: API):
     assert get_env_bool("TWS_RAISE_WHEN_NO_ACCOUNT") is False
 
 
+def test_get_entries_ignores_malformed_timeline_entries(api_mock: API):
+    obj = {
+        "entries": [
+            None,
+            "not-a-dict",
+            {"entryId": "cursor-bottom-1"},
+            {"entryId": "messageprompt-1"},
+            {"entryId": "module-1"},
+            {"entryId": "who-to-follow-1"},
+            {"entryId": "tweet-1"},
+            {"content": {"entryType": "TimelineTimelineItem"}},
+        ]
+    }
+
+    entries = api_mock._get_entries(obj)
+
+    assert entries == [
+        {"entryId": "tweet-1"},
+        {"content": {"entryType": "TimelineTimelineItem"}},
+    ]
+
+
 async def test_gql_items_stops_on_repeated_search_page(api_mock: API, monkeypatch):
     pages = [
         DummyResponse(make_search_page(["tweet-1", "tweet-2"], "cursor-1")),
