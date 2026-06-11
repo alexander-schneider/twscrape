@@ -283,6 +283,9 @@ async def test_service_unavailable_raises_typed_error_without_cooling_account_af
         ("(29) Timeout: Unspecified", True),
         ("(999) New safety gate required; (-1) Internal server error", True),
         ("(-1) Internal server error; (999) New safety gate required", True),
+        ("(32) Could not authenticate you", False),
+        ("(64) Your account is suspended", False),
+        ("(88) Rate limit exceeded", False),
         ("(999) New safety gate required", False),
     ],
 )
@@ -325,6 +328,7 @@ async def test_transient_x_api_error_retries_with_same_account(
     "error",
     [
         {"code": -1, "message": "Internal server error"},
+        {"code": -1, "message": "Dependency: Unspecified"},
         {"code": 29, "message": "Timeout: Unspecified"},
     ],
 )

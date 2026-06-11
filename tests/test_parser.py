@@ -18,6 +18,7 @@ from twscrape.models import (
     UserRef,
     parse_tweet,
     parse_tweets,
+    parse_users,
 )
 
 BASE_DIR = os.path.dirname(__file__)
@@ -299,6 +300,243 @@ async def test_user_ref_parse_current_shape():
     assert doc.username == "daltonbrewer"
     assert doc.displayname == "Dalton Brewer"
     check_user_ref(doc)
+
+
+def test_parse_users_current_shape_without_graphql_id():
+    payload = {
+        "data": {
+            "user": {
+                "result": {
+                    "__typename": "User",
+                    "rest_id": "2030572972407435264",
+                    "legacy": None,
+                    "core": {
+                        "created_at": "Sun Mar 08 09:14:58 +0000 2026",
+                        "name": "Shauna Fatora",
+                        "screen_name": "SFatora73036",
+                    },
+                    "avatar": {
+                        "image_url": "https://pbs.twimg.com/profile_images/2030572993135435777/N5cWNSt4_normal.jpg"
+                    },
+                    "location": {"location": ""},
+                    "privacy": {"protected": False},
+                    "profile_bio": {"description": ""},
+                    "verification": {"verified": False},
+                    "is_blue_verified": False,
+                }
+            }
+        }
+    }
+
+    users = list(parse_users(payload))
+
+    assert len(users) == 1
+    assert users[0].id == 2030572972407435264
+    assert users[0].username == "SFatora73036"
+    check_user(users[0])
+
+
+def test_parse_users_current_shape_with_malformed_nested_fields():
+    payload = {
+        "data": {
+            "user": {
+                "result": {
+                    "__typename": "User",
+                    "rest_id": "2030572972407435264",
+                    "legacy": None,
+                    "core": {
+                        "created_at": "Sun Mar 08 09:14:58 +0000 2026",
+                        "name": "Shauna Fatora",
+                        "screen_name": "SFatora73036",
+                    },
+                    "avatar": "bad-avatar",
+                    "location": ["bad-location"],
+                    "privacy": "public",
+                    "profile_bio": "bio",
+                    "verification": "verified",
+                    "is_blue_verified": False,
+                }
+            }
+        }
+    }
+
+    users = list(parse_users(payload))
+
+    assert len(users) == 1
+    assert users[0].username == "SFatora73036"
+    assert users[0].profileImageUrl == ""
+    assert users[0].location == ""
+    assert users[0].rawDescription == ""
+    check_user(users[0])
+
+
+def test_parse_tweet_with_legacy_null_current_shape():
+    payload = {
+        "data": {
+            "search_by_raw_query": {
+                "search_timeline": {
+                    "timeline": {
+                        "instructions": [
+                            {
+                                "entries": [
+                                    {
+                                        "content": {
+                                            "itemContent": {
+                                                "tweet_results": {
+                                                    "result": {
+                                                        "__typename": "Tweet",
+                                                        "rest_id": "2031000000000000001",
+                                                        "legacy": None,
+                                                        "created_at": "Wed May 27 12:00:00 +0000 2026",
+                                                        "full_text": "$NVDA earnings setup",
+                                                        "lang": "en",
+                                                        "reply_count": 1,
+                                                        "retweet_count": 2,
+                                                        "favorite_count": 3,
+                                                        "quote_count": 4,
+                                                        "bookmark_count": 5,
+                                                        "conversation_id_str": "2031000000000000001",
+                                                        "entities": {
+                                                            "hashtags": [],
+                                                            "symbols": [{"text": "NVDA"}],
+                                                            "user_mentions": [],
+                                                            "urls": [],
+                                                        },
+                                                        "core": {
+                                                            "user_results": {
+                                                                "result": {
+                                                                    "__typename": "User",
+                                                                    "rest_id": "2030572972407435264",
+                                                                    "legacy": None,
+                                                                    "core": {
+                                                                        "created_at": "Sun Mar 08 09:14:58 +0000 2026",
+                                                                        "name": "Shauna Fatora",
+                                                                        "screen_name": "SFatora73036",
+                                                                    },
+                                                                    "avatar": {
+                                                                        "image_url": "https://pbs.twimg.com/profile_images/2030572993135435777/N5cWNSt4_normal.jpg"
+                                                                    },
+                                                                    "location": {"location": ""},
+                                                                    "privacy": {
+                                                                        "protected": False
+                                                                    },
+                                                                    "profile_bio": {
+                                                                        "description": ""
+                                                                    },
+                                                                    "verification": {
+                                                                        "verified": False
+                                                                    },
+                                                                    "is_blue_verified": False,
+                                                                }
+                                                            }
+                                                        },
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                }
+            }
+        }
+    }
+
+    tweets = list(parse_tweets(payload))
+
+    assert len(tweets) == 1
+    tweet = tweets[0]
+    assert tweet.id == 2031000000000000001
+    assert tweet.user.username == "SFatora73036"
+    assert tweet.rawContent == "$NVDA earnings setup"
+    assert tweet.bookmarkedCount == 5
+    assert tweet.user.profileImageUrl.endswith("_normal.jpg")
+    check_tweet(tweet)
+
+
+def test_parse_tweets_current_shape_without_tweet_rest_id():
+    payload = {
+        "data": {
+            "search_by_raw_query": {
+                "search_timeline": {
+                    "timeline": {
+                        "instructions": [
+                            {
+                                "entries": [
+                                    {
+                                        "content": {
+                                            "itemContent": {
+                                                "tweet_results": {
+                                                    "result": {
+                                                        "__typename": "Tweet",
+                                                        "id_str": "2031000000000000002",
+                                                        "legacy": None,
+                                                        "created_at": "Wed May 27 12:00:00 +0000 2026",
+                                                        "full_text": "$NVDA without rest_id",
+                                                        "lang": "en",
+                                                        "reply_count": 1,
+                                                        "retweet_count": 2,
+                                                        "favorite_count": 3,
+                                                        "quote_count": 4,
+                                                        "bookmark_count": 5,
+                                                        "conversation_id_str": "2031000000000000002",
+                                                        "entities": {
+                                                            "hashtags": [],
+                                                            "symbols": [{"text": "NVDA"}],
+                                                            "user_mentions": [],
+                                                            "urls": [],
+                                                        },
+                                                        "core": {
+                                                            "user_results": {
+                                                                "result": {
+                                                                    "__typename": "User",
+                                                                    "rest_id": "2030572972407435264",
+                                                                    "legacy": None,
+                                                                    "core": {
+                                                                        "created_at": "Sun Mar 08 09:14:58 +0000 2026",
+                                                                        "name": "Shauna Fatora",
+                                                                        "screen_name": "SFatora73036",
+                                                                    },
+                                                                    "avatar": {
+                                                                        "image_url": "https://pbs.twimg.com/profile_images/2030572993135435777/N5cWNSt4_normal.jpg"
+                                                                    },
+                                                                    "location": {"location": ""},
+                                                                    "privacy": {
+                                                                        "protected": False
+                                                                    },
+                                                                    "profile_bio": {
+                                                                        "description": ""
+                                                                    },
+                                                                    "verification": {
+                                                                        "verified": False
+                                                                    },
+                                                                    "is_blue_verified": False,
+                                                                }
+                                                            }
+                                                        },
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                }
+            }
+        }
+    }
+
+    tweets = list(parse_tweets(payload))
+
+    assert len(tweets) == 1
+    assert tweets[0].id == 2031000000000000002
+    assert tweets[0].id_str == "2031000000000000002"
+    assert tweets[0].rawContent == "$NVDA without rest_id"
+    check_tweet(tweets[0])
 
 
 async def test_tweet_details():

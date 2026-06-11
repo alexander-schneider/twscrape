@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.19.5 - 2026-05-28
+
+### Fixed
+
+- Reconcile the fork with upstream v0.18.1 X compatibility fixes for current
+  GraphQL payload shapes, including `legacy = null` tweets/users and moved user
+  fields.
+- Treat `Dependency: Unspecified` as a transient X backend failure.
+- Continue SearchTimeline pagination past bounded empty pages while preserving
+  repeated cursor/page stall protection.
+- Harden current-shape user/tweet flattening against malformed nested fields.
+
 ## v0.19.4 - 2026-05-20
 
 ### Fixed

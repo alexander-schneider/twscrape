@@ -1,6 +1,6 @@
 import pytest
 
-from twscrape.utils import parse_cookies
+from twscrape.utils import parse_cookies, to_old_obj
 
 
 def test_cookies_parse():
@@ -25,3 +25,32 @@ def test_cookies_parse():
     with pytest.raises(ValueError, match=r"Invalid cookie value: .+"):
         val = "{invalid}"
         assert parse_cookies(val) == {}
+
+
+def test_to_old_obj_user_handles_non_dict_nested_fields():
+    doc = to_old_obj(
+        {
+            "__typename": "User",
+            "legacy": None,
+            "id_str": 123,
+            "avatar": [],
+            "location": "Berlin",
+            "privacy": "public",
+            "verification": [],
+            "profile_bio": "bio",
+        }
+    )
+
+    assert doc["id_str"] == "123"
+    assert doc["id"] == 123
+    assert doc["profile_image_url_https"] == ""
+    assert doc["location"] == "Berlin"
+    assert doc["description"] == ""
+
+
+def test_to_old_obj_tweet_casts_fallback_id_str():
+    doc = to_old_obj({"__typename": "Tweet", "legacy": None, "id_str": 456})
+
+    assert doc["id_str"] == "456"
+    assert doc["id"] == 456
+    assert doc["conversation_id_str"] == "456"

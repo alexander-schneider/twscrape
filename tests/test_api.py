@@ -109,11 +109,74 @@ async def test_raise_when_no_account(api_mock: API):
     assert get_env_bool("TWS_RAISE_WHEN_NO_ACCOUNT") is False
 
 
+def test_get_entries_ignores_malformed_timeline_entries(api_mock: API):
+    obj = {
+        "entries": [
+            None,
+            "not-a-dict",
+            {"entryId": "cursor-bottom-1"},
+            {"entryId": "messageprompt-1"},
+            {"entryId": "module-1"},
+            {"entryId": "who-to-follow-1"},
+            {"entryId": "tweet-1"},
+            {"content": {"entryType": "TimelineTimelineItem"}},
+        ]
+    }
+
+    entries = api_mock._get_entries(obj)
+
+    assert entries == [
+        {"entryId": "tweet-1"},
+        {"content": {"entryType": "TimelineTimelineItem"}},
+    ]
+
+
 async def test_gql_items_stops_on_repeated_search_page(api_mock: API, monkeypatch):
     pages = [
         DummyResponse(make_search_page(["tweet-1", "tweet-2"], "cursor-1")),
         DummyResponse(make_search_page(["tweet-1", "tweet-2"], "cursor-2")),
         DummyResponse(make_search_page(["tweet-3", "tweet-4"], None)),
+    ]
+    calls = []
+
+    class FakeQueueClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            return None
+
+        async def get(self, url, params=None):
+            calls.append(("get", url, params))
+            raise AssertionError("SearchTimeline should use POST")
+
+        async def post(self, url, json=None):
+            calls.append(("post", url, json))
+            if not pages:
+                raise AssertionError("unexpected extra pagination request")
+            return pages.pop(0)
+
+    monkeypatch.setattr(api_module, "QueueClient", FakeQueueClient)
+
+    reps = await gather(
+        api_mock._gql_items(
+            api_module.OP_SearchTimeline,
+            {"rawQuery": "foo", "count": 20, "product": "Latest", "querySource": "typed_query"},
+        )
+    )
+
+    assert len(reps) == 1
+    assert len(calls) == 2
+    assert all(x[0] == "post" for x in calls)
+
+
+async def test_gql_items_continues_past_empty_search_pages(api_mock: API, monkeypatch):
+    pages = [
+        DummyResponse(make_search_page([], "cursor-1")),
+        DummyResponse(make_search_page(["tweet-1", "tweet-2"], None)),
     ]
     calls = []
 
