@@ -16,6 +16,7 @@ ReqParams = dict[str, str | int] | None
 TMP_TS = utc.now().isoformat().split(".")[0].replace("T", "_").replace(":", "-")[0:16]
 LOADSHED_COOLDOWN_SECONDS = 120
 TRANSPORT_ERROR_RETRY_LIMIT = 3
+TRANSIENT_API_ERROR_RETRY_LIMIT = 3
 UNKNOWN_API_ERROR_COOLDOWN_SECONDS = 60 * 15
 
 
@@ -341,7 +342,7 @@ class QueueClient:
         params: ReqParams = None,
         json: Any = None,
     ) -> Response | None:
-        unknown_retry, transport_retry = 0, 0
+        unknown_retry, transport_retry, transient_api_retry = 0, 0, 0
 
         while True:
             ctx = await self._get_ctx()  # not need to close client, class implements __aexit__
@@ -354,18 +355,23 @@ class QueueClient:
                 await self._check_rep(rep)
 
                 ctx.req_count += 1  # count only successful
-                unknown_retry, transport_retry = 0, 0
+                unknown_retry, transport_retry, transient_api_retry = 0, 0, 0
                 return rep
             except AbortReqError:
                 # abort all queries
                 return
             except ApiFeatureUpdateRequiredError:
                 raise
+            except ServiceUnavailableError as e:
+                transient_api_retry += 1
+                if transient_api_retry >= TRANSIENT_API_ERROR_RETRY_LIMIT:
+                    raise e
+                await asyncio.sleep(1)
             except UnexpectedApiError:
                 raise
             except HandledError:
                 # retry with new account
-                unknown_retry, transport_retry = 0, 0
+                unknown_retry, transport_retry, transient_api_retry = 0, 0, 0
                 continue
             except (
                 httpx.ReadTimeout,
