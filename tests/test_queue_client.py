@@ -10,6 +10,7 @@ from twscrape.queue_client import (
     QueueClient,
     ServiceUnavailableError,
     UnexpectedApiError,
+    XClIdGenStore,
     is_transient_api_error,
 )
 
@@ -72,6 +73,33 @@ async def test_do_not_switch_account_on_200(httpx_mock: HTTPXMock, client_fixtur
     await client.__aexit__(None, None, None)
     locked3 = await get_locked(pool)
     assert len(locked3) == 0
+
+
+async def test_xclid_generation_uses_account_metadata(
+    httpx_mock: HTTPXMock, client_fixture: CF, monkeypatch
+):
+    _pool, client = client_fixture
+    calls = []
+
+    class LocalClIdGenMock:
+        def calc(*args, **kwargs):
+            return "mocked-clid"
+
+    async def mock_get(cls, acc, proxy=None, fresh=False):
+        calls.append((acc.username, proxy, fresh))
+        return LocalClIdGenMock()
+
+    monkeypatch.setattr(XClIdGenStore, "get", classmethod(mock_get))
+
+    async with client:
+        assert client.ctx is not None
+        httpx_mock.add_response(url=URL, json={"foo": "bar"}, status_code=200)
+
+        rep = await client.get(URL)
+
+    assert rep is not None
+    assert rep.json() == {"foo": "bar"}
+    assert calls == [("user1", None, False)]
 
 
 async def test_switch_acc_on_http_error(httpx_mock: HTTPXMock, client_fixture: CF):

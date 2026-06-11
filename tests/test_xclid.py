@@ -213,7 +213,7 @@ async def test_get_tw_page_text_closes_owned_client(monkeypatch):
             self.closed = True
 
     fake_client = FakeClient()
-    monkeypatch.setattr("twscrape.xclid._make_client", lambda: fake_client)
+    monkeypatch.setattr("twscrape.xclid._make_client", lambda **kwargs: fake_client)
 
     assert await get_tw_page_text("https://x.com/tesla") == "<html>ok</html>"
     assert fake_client.closed is True
@@ -243,7 +243,7 @@ async def test_xclid_create_retries_transient_generation_errors(monkeypatch):
     async def fake_sleep(_seconds: float):
         return None
 
-    monkeypatch.setattr("twscrape.xclid._make_client", lambda: fake_client)
+    monkeypatch.setattr("twscrape.xclid._make_client", lambda **kwargs: fake_client)
     monkeypatch.setattr("twscrape.xclid.get_tw_page_text", fake_get_tw_page_text)
     monkeypatch.setattr("twscrape.xclid.load_keys", fake_load_keys)
     monkeypatch.setattr("twscrape.xclid.asyncio.sleep", fake_sleep)
@@ -253,6 +253,43 @@ async def test_xclid_create_retries_transient_generation_errors(monkeypatch):
     assert attempts["count"] == 2
     assert gen.anim_key == "anim-key"
     assert fake_client.closed is True
+
+
+@pytest.mark.asyncio
+async def test_xclid_create_passes_browser_client_metadata(monkeypatch):
+    class FakeClient:
+        async def aclose(self):
+            return None
+
+    calls = []
+
+    def fake_make_client(**kwargs):
+        calls.append(kwargs)
+        return FakeClient()
+
+    async def fake_get_tw_page_text(url: str, clt=None):
+        return "<html></html>"
+
+    async def fake_load_keys(page_text: str, soup, clt=None):
+        return [1] * 64, "anim-key"
+
+    monkeypatch.setattr("twscrape.xclid._make_client", fake_make_client)
+    monkeypatch.setattr("twscrape.xclid.get_tw_page_text", fake_get_tw_page_text)
+    monkeypatch.setattr("twscrape.xclid.load_keys", fake_load_keys)
+
+    await XClIdGen.create(
+        proxy="http://proxy.local",
+        user_agent="ua",
+        cookies={"auth_token": "token"},
+    )
+
+    assert calls == [
+        {
+            "proxy": "http://proxy.local",
+            "user_agent": "ua",
+            "cookies": {"auth_token": "token"},
+        }
+    ]
 
 
 @pytest.mark.asyncio

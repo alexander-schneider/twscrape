@@ -65,14 +65,28 @@ class XClIdGenStore:
     items: dict[str, XClIdGen] = {}  # username -> XClIdGen
 
     @classmethod
-    async def get(cls, username: str, fresh=False) -> XClIdGen:
+    async def get(
+        cls,
+        acc: Account,
+        proxy: str | None = None,
+        fresh=False,
+    ) -> XClIdGen:
+        username = acc.username
         if username in cls.items and not fresh:
             return cls.items[username]
+
+        proxies = [proxy, os.getenv("TWS_PROXY"), acc.proxy]
+        proxies = [x for x in proxies if x is not None]
+        selected_proxy = proxies[0] if proxies else None
 
         tries = 0
         while tries < 3:
             try:
-                clid_gen = await XClIdGen.create()
+                clid_gen = await XClIdGen.create(
+                    proxy=selected_proxy,
+                    user_agent=acc.user_agent,
+                    cookies=acc.cookies,
+                )
                 cls.items[username] = clid_gen
                 return clid_gen
             except httpx.HTTPStatusError:
@@ -85,10 +99,11 @@ class XClIdGenStore:
 
 
 class Ctx:
-    def __init__(self, acc: Account, clt: AsyncClient):
+    def __init__(self, acc: Account, clt: AsyncClient, proxy: str | None = None):
         self.req_count = 0
         self.acc = acc
         self.clt = clt
+        self.proxy = proxy
 
     async def aclose(self):
         await self.clt.aclose()
@@ -106,7 +121,7 @@ class Ctx:
 
         tries = 0
         while tries < 3:
-            gen = await XClIdGenStore.get(self.acc.username, fresh=tries > 0)
+            gen = await XClIdGenStore.get(self.acc, proxy=self.proxy, fresh=tries > 0)
             hdr = {"x-client-transaction-id": gen.calc(method, path)}
             rep = await self.clt.request(method, url, params=params, json=json, headers=hdr)
             if rep.status_code != 404:
@@ -208,7 +223,7 @@ class QueueClient:
             return None
 
         clt = acc.make_client(proxy=self.proxy)
-        self.ctx = Ctx(acc, clt)
+        self.ctx = Ctx(acc, clt, proxy=self.proxy)
         return self.ctx
 
     async def _check_rep(self, rep: Response) -> None:

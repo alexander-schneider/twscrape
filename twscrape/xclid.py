@@ -16,9 +16,16 @@ class XClIdError(Exception):
     pass
 
 
-def _make_client() -> httpx.AsyncClient:
-    headers = {"user-agent": UserAgent().chrome}
-    return httpx.AsyncClient(headers=headers, follow_redirects=True)
+def _make_client(
+    proxy: str | None = None,
+    user_agent: str | None = None,
+    cookies: dict[str, str] | None = None,
+) -> httpx.AsyncClient:
+    headers = {"user-agent": user_agent or UserAgent().chrome}
+    client = httpx.AsyncClient(headers=headers, follow_redirects=True, proxy=proxy)
+    if cookies:
+        client.cookies.update(cookies)
+    return client
 
 
 async def get_tw_page_text(url: str, clt: httpx.AsyncClient | None = None):
@@ -342,9 +349,14 @@ async def load_keys(
 
 class XClIdGen:
     @staticmethod
-    async def create(clt: httpx.AsyncClient | None = None) -> "XClIdGen":
+    async def create(
+        clt: httpx.AsyncClient | None = None,
+        proxy: str | None = None,
+        user_agent: str | None = None,
+        cookies: dict[str, str] | None = None,
+    ) -> "XClIdGen":
         owns_client = clt is None
-        clt = clt or _make_client()
+        clt = clt or _make_client(proxy=proxy, user_agent=user_agent, cookies=cookies)
         last_error: Exception | None = None
 
         try:
