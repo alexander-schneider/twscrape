@@ -6,6 +6,7 @@ import math
 import random
 import re
 import time
+from http.cookiejar import Cookie
 from urllib.parse import urlparse
 
 import bs4
@@ -26,8 +27,30 @@ def _make_client(
     client = httpx.AsyncClient(headers=headers, follow_redirects=True, proxy=proxy)
     if cookies:
         for key, value in cookies.items():
-            client.cookies.set(key, value, domain=".x.com", path="/")
+            client.cookies.jar.set_cookie(_make_secure_x_cookie(key, value))
     return client
+
+
+def _make_secure_x_cookie(name: str, value: str) -> Cookie:
+    return Cookie(
+        version=0,
+        name=name,
+        value=value,
+        port=None,
+        port_specified=False,
+        domain=".x.com",
+        domain_specified=True,
+        domain_initial_dot=True,
+        path="/",
+        path_specified=True,
+        secure=True,
+        expires=None,
+        discard=True,
+        comment=None,
+        comment_url=None,
+        rest={},
+        rfc2109=False,
+    )
 
 
 async def get_tw_page_text(url: str, clt: httpx.AsyncClient | None = None):
@@ -93,7 +116,11 @@ def _normalize_asset_url(url: str) -> str:
 
 
 def _is_allowed_script_url(url: str) -> bool:
-    host = (urlparse(url).hostname or "").lower()
+    parsed = urlparse(url)
+    if parsed.scheme != "https":
+        return False
+
+    host = (parsed.hostname or "").lower()
     return host in {"x.com", "twitter.com", "abs.twimg.com"}
 
 

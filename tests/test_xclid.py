@@ -71,12 +71,15 @@ async def test_xclid_client_scopes_account_cookies_to_x_domain():
     client = _make_client(cookies={"auth_token": "token", "ct0": "csrf"})
     try:
         x_request = client.build_request("GET", "https://x.com/tesla")
+        insecure_x_request = client.build_request("GET", "http://x.com/tesla")
         asset_request = client.build_request(
             "GET", "https://abs.twimg.com/responsive-web/client-web/main.js"
         )
 
         assert "auth_token=token" in x_request.headers.get("cookie", "")
         assert "ct0=csrf" in x_request.headers.get("cookie", "")
+        assert "auth_token" not in insecure_x_request.headers.get("cookie", "")
+        assert "ct0" not in insecure_x_request.headers.get("cookie", "")
         assert "auth_token" not in asset_request.headers.get("cookie", "")
         assert "ct0" not in asset_request.headers.get("cookie", "")
     finally:
@@ -279,6 +282,7 @@ async def test_parse_anim_idx_skips_untrusted_script_hosts(monkeypatch):
     <html>
       <head>
         <script src="https://example.invalid/evil.js"></script>
+        <script src="http://x.com/responsive-web/client-web/plaintext.js"></script>
         <script src="https://abs.twimg.com/responsive-web/client-web/main.12345a.js"></script>
       </head>
     </html>
