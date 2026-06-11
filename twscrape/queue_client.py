@@ -38,6 +38,7 @@ class ServiceUnavailableError(UnexpectedApiError): ...
 TRANSIENT_API_ERROR_FRAGMENTS = (
     "(-1) ServiceUnavailable",
     "(-1) Internal server error",
+    "(-1) Dependency: Unspecified",
     "(29) Timeout: Unspecified",
 )
 

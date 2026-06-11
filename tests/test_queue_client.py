@@ -279,6 +279,7 @@ async def test_service_unavailable_raises_typed_error_without_cooling_account_af
     [
         ("(-1) ServiceUnavailable: Unspecified", True),
         ("(-1) Internal server error", True),
+        ("(-1) Dependency: Unspecified", True),
         ("(29) Timeout: Unspecified", True),
         ("(999) New safety gate required; (-1) Internal server error", True),
         ("(-1) Internal server error; (999) New safety gate required", True),

@@ -6,6 +6,7 @@ import math
 import random
 import re
 import time
+from urllib.parse import urlparse
 
 import bs4
 import httpx
@@ -24,7 +25,8 @@ def _make_client(
     headers = {"user-agent": user_agent or UserAgent().chrome}
     client = httpx.AsyncClient(headers=headers, follow_redirects=True, proxy=proxy)
     if cookies:
-        client.cookies.update(cookies)
+        for key, value in cookies.items():
+            client.cookies.set(key, value, domain=".x.com", path="/")
     return client
 
 
@@ -88,6 +90,11 @@ def _normalize_asset_url(url: str) -> str:
         return f"https:{url}"
 
     return url
+
+
+def _is_allowed_script_url(url: str) -> bool:
+    host = (urlparse(url).hostname or "").lower()
+    return host in {"x.com", "twitter.com", "abs.twimg.com"}
 
 
 def _parse_current_html_scripts(text: str):
@@ -297,7 +304,7 @@ async def parse_anim_idx(text: str, clt: httpx.AsyncClient | None = None) -> lis
     scripts = list(get_scripts_list(text))
     preferred_scripts = [x for x in scripts if "/ondemand.s." in x]
     fallback_scripts = [x for x in scripts if x not in preferred_scripts]
-    scripts = preferred_scripts + fallback_scripts
+    scripts = [x for x in preferred_scripts + fallback_scripts if _is_allowed_script_url(x)]
     if not scripts:
         raise XClIdError("Couldn't get XClientTxId scripts")
 
