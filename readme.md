@@ -43,6 +43,21 @@ cd twscrape
 pip install -e .[dev]
 ```
 
+## Adanos Release Checklist
+
+When creating a fork release tag for Adanos, always bump the package version in
+`pyproject.toml` before tagging. The Git tag and package metadata must describe
+the same version; otherwise downstream installs can point at a new tag while pip
+still builds the previous package version.
+
+Before pushing a release tag, verify the wheel metadata:
+
+```bash
+python -m build --wheel
+python -m pip install "dist/twscrape-<version>-py3-none-any.whl"
+python -c "from importlib.metadata import version; print(version('twscrape'))"
+```
+
 ## Local Smoke Test
 
 For local development, split the checks into two layers:
