@@ -417,9 +417,15 @@ def test_parse_tweet_with_legacy_null_current_shape():
                                                                         "image_url": "https://pbs.twimg.com/profile_images/2030572993135435777/N5cWNSt4_normal.jpg"
                                                                     },
                                                                     "location": {"location": ""},
-                                                                    "privacy": {"protected": False},
-                                                                    "profile_bio": {"description": ""},
-                                                                    "verification": {"verified": False},
+                                                                    "privacy": {
+                                                                        "protected": False
+                                                                    },
+                                                                    "profile_bio": {
+                                                                        "description": ""
+                                                                    },
+                                                                    "verification": {
+                                                                        "verified": False
+                                                                    },
                                                                     "is_blue_verified": False,
                                                                 }
                                                             }
@@ -497,9 +503,15 @@ def test_parse_tweets_current_shape_without_tweet_rest_id():
                                                                         "image_url": "https://pbs.twimg.com/profile_images/2030572993135435777/N5cWNSt4_normal.jpg"
                                                                     },
                                                                     "location": {"location": ""},
-                                                                    "privacy": {"protected": False},
-                                                                    "profile_bio": {"description": ""},
-                                                                    "verification": {"verified": False},
+                                                                    "privacy": {
+                                                                        "protected": False
+                                                                    },
+                                                                    "profile_bio": {
+                                                                        "description": ""
+                                                                    },
+                                                                    "verification": {
+                                                                        "verified": False
+                                                                    },
                                                                     "is_blue_verified": False,
                                                                 }
                                                             }

@@ -5,6 +5,7 @@ from bs4 import BeautifulSoup
 from twscrape.xclid import (
     XClIdError,
     XClIdGen,
+    _make_client,
     get_scripts_list,
     get_tw_page_text,
     load_keys,
@@ -63,6 +64,26 @@ def test_get_scripts_list_current_xcom_html():
     assert "https://abs.twimg.com/responsive-web/client-web/vendor.d74f1a3a.js" in scripts
     assert "https://abs.twimg.com/responsive-web/client-web/main.540aea7a.js" in scripts
     assert "https://abs.twimg.com/responsive-web/client-web/ondemand.s.246a373a.js" in scripts
+
+
+@pytest.mark.asyncio
+async def test_xclid_client_scopes_account_cookies_to_x_domain():
+    client = _make_client(cookies={"auth_token": "token", "ct0": "csrf"})
+    try:
+        x_request = client.build_request("GET", "https://x.com/tesla")
+        insecure_x_request = client.build_request("GET", "http://x.com/tesla")
+        asset_request = client.build_request(
+            "GET", "https://abs.twimg.com/responsive-web/client-web/main.js"
+        )
+
+        assert "auth_token=token" in x_request.headers.get("cookie", "")
+        assert "ct0=csrf" in x_request.headers.get("cookie", "")
+        assert "auth_token" not in insecure_x_request.headers.get("cookie", "")
+        assert "ct0" not in insecure_x_request.headers.get("cookie", "")
+        assert "auth_token" not in asset_request.headers.get("cookie", "")
+        assert "ct0" not in asset_request.headers.get("cookie", "")
+    finally:
+        await client.aclose()
 
 
 def test_get_scripts_list_chunk_name_and_hash_maps():
@@ -213,7 +234,7 @@ async def test_get_tw_page_text_closes_owned_client(monkeypatch):
             self.closed = True
 
     fake_client = FakeClient()
-    monkeypatch.setattr("twscrape.xclid._make_client", lambda: fake_client)
+    monkeypatch.setattr("twscrape.xclid._make_client", lambda **kwargs: fake_client)
 
     assert await get_tw_page_text("https://x.com/tesla") == "<html>ok</html>"
     assert fake_client.closed is True
@@ -243,7 +264,7 @@ async def test_xclid_create_retries_transient_generation_errors(monkeypatch):
     async def fake_sleep(_seconds: float):
         return None
 
-    monkeypatch.setattr("twscrape.xclid._make_client", lambda: fake_client)
+    monkeypatch.setattr("twscrape.xclid._make_client", lambda **kwargs: fake_client)
     monkeypatch.setattr("twscrape.xclid.get_tw_page_text", fake_get_tw_page_text)
     monkeypatch.setattr("twscrape.xclid.load_keys", fake_load_keys)
     monkeypatch.setattr("twscrape.xclid.asyncio.sleep", fake_sleep)
@@ -253,6 +274,66 @@ async def test_xclid_create_retries_transient_generation_errors(monkeypatch):
     assert attempts["count"] == 2
     assert gen.anim_key == "anim-key"
     assert fake_client.closed is True
+
+
+@pytest.mark.asyncio
+async def test_parse_anim_idx_skips_untrusted_script_hosts(monkeypatch):
+    html = """
+    <html>
+      <head>
+        <script src="https://example.invalid/evil.js"></script>
+        <script src="http://x.com/responsive-web/client-web/plaintext.js"></script>
+        <script src="https://abs.twimg.com/responsive-web/client-web/main.12345a.js"></script>
+      </head>
+    </html>
+    """
+    calls = []
+
+    async def fake_get_tw_page_text(url: str, clt=None):
+        calls.append(url)
+        return "(a[7], 16)"
+
+    monkeypatch.setattr("twscrape.xclid.get_tw_page_text", fake_get_tw_page_text)
+
+    assert await parse_anim_idx(html) == [7]
+    assert calls == ["https://abs.twimg.com/responsive-web/client-web/main.12345a.js"]
+
+
+@pytest.mark.asyncio
+async def test_xclid_create_passes_browser_client_metadata(monkeypatch):
+    class FakeClient:
+        async def aclose(self):
+            return None
+
+    calls = []
+
+    def fake_make_client(**kwargs):
+        calls.append(kwargs)
+        return FakeClient()
+
+    async def fake_get_tw_page_text(url: str, clt=None):
+        return "<html></html>"
+
+    async def fake_load_keys(page_text: str, soup, clt=None):
+        return [1] * 64, "anim-key"
+
+    monkeypatch.setattr("twscrape.xclid._make_client", fake_make_client)
+    monkeypatch.setattr("twscrape.xclid.get_tw_page_text", fake_get_tw_page_text)
+    monkeypatch.setattr("twscrape.xclid.load_keys", fake_load_keys)
+
+    await XClIdGen.create(
+        proxy="http://proxy.local",
+        user_agent="ua",
+        cookies={"auth_token": "token"},
+    )
+
+    assert calls == [
+        {
+            "proxy": "http://proxy.local",
+            "user_agent": "ua",
+            "cookies": {"auth_token": "token"},
+        }
+    ]
 
 
 @pytest.mark.asyncio

@@ -10,6 +10,7 @@ from twscrape.queue_client import (
     QueueClient,
     ServiceUnavailableError,
     UnexpectedApiError,
+    XClIdGenStore,
     is_transient_api_error,
 )
 
@@ -72,6 +73,33 @@ async def test_do_not_switch_account_on_200(httpx_mock: HTTPXMock, client_fixtur
     await client.__aexit__(None, None, None)
     locked3 = await get_locked(pool)
     assert len(locked3) == 0
+
+
+async def test_xclid_generation_uses_account_metadata(
+    httpx_mock: HTTPXMock, client_fixture: CF, monkeypatch
+):
+    _pool, client = client_fixture
+    calls = []
+
+    class LocalClIdGenMock:
+        def calc(*args, **kwargs):
+            return "mocked-clid"
+
+    async def mock_get(cls, acc, proxy=None, fresh=False):
+        calls.append((acc.username, proxy, fresh))
+        return LocalClIdGenMock()
+
+    monkeypatch.setattr(XClIdGenStore, "get", classmethod(mock_get))
+
+    async with client:
+        assert client.ctx is not None
+        httpx_mock.add_response(url=URL, json={"foo": "bar"}, status_code=200)
+
+        rep = await client.get(URL)
+
+    assert rep is not None
+    assert rep.json() == {"foo": "bar"}
+    assert calls == [("user1", None, False)]
 
 
 async def test_switch_acc_on_http_error(httpx_mock: HTTPXMock, client_fixture: CF):
@@ -219,20 +247,22 @@ async def test_unknown_api_errors_fail_closed_and_cool_account(
     assert getattr(rep, "__username", None) == "user2"
 
 
-async def test_service_unavailable_raises_typed_error_without_cooling_account(
-    httpx_mock: HTTPXMock, client_fixture: CF
+async def test_service_unavailable_raises_typed_error_without_cooling_account_after_retries(
+    httpx_mock: HTTPXMock, client_fixture: CF, monkeypatch
 ):
     pool, client = client_fixture
+    monkeypatch.setattr("twscrape.queue_client.asyncio.sleep", _mock_sleep)
 
     await client.__aenter__()
     assert client.ctx is not None
     assert client.ctx.acc.username == "user1"
 
-    httpx_mock.add_response(
-        url=URL,
-        json={"errors": [{"code": -1, "message": "ServiceUnavailable: Unspecified"}]},
-        status_code=200,
-    )
+    for _ in range(3):
+        httpx_mock.add_response(
+            url=URL,
+            json={"errors": [{"code": -1, "message": "ServiceUnavailable: Unspecified"}]},
+            status_code=200,
+        )
 
     with pytest.raises(ServiceUnavailableError, match="ServiceUnavailable"):
         await client.get(URL)
@@ -263,6 +293,37 @@ def test_transient_api_error_detection(message: str, expected: bool):
     assert is_transient_api_error(message) is expected
 
 
+async def _mock_sleep(*args, **kwargs):
+    return None
+
+
+async def test_transient_x_api_error_retries_with_same_account(
+    httpx_mock: HTTPXMock, client_fixture: CF, monkeypatch
+):
+    pool, client = client_fixture
+    monkeypatch.setattr("twscrape.queue_client.asyncio.sleep", _mock_sleep)
+
+    await client.__aenter__()
+    assert client.ctx is not None
+    assert client.ctx.acc.username == "user1"
+
+    httpx_mock.add_response(
+        url=URL,
+        json={"errors": [{"code": -1, "message": "Internal server error"}]},
+        status_code=200,
+    )
+    httpx_mock.add_response(url=URL, json={"foo": "ok"}, status_code=200)
+
+    rep = await client.get(URL)
+
+    assert rep is not None
+    assert rep.json() == {"foo": "ok"}
+    assert getattr(rep, "__username", None) == "user1"
+
+    locked = await get_locked(pool)
+    assert locked == {"user1"}
+
+
 @pytest.mark.parametrize(
     "error",
     [
@@ -271,22 +332,25 @@ def test_transient_api_error_detection(message: str, expected: bool):
         {"code": 29, "message": "Timeout: Unspecified"},
     ],
 )
-async def test_transient_x_api_errors_raise_typed_error_without_cooling_account(
+async def test_transient_x_api_errors_raise_typed_error_without_cooling_account_after_retries(
     error: dict[str, int | str],
     httpx_mock: HTTPXMock,
     client_fixture: CF,
+    monkeypatch,
 ):
     pool, client = client_fixture
+    monkeypatch.setattr("twscrape.queue_client.asyncio.sleep", _mock_sleep)
 
     await client.__aenter__()
     assert client.ctx is not None
     assert client.ctx.acc.username == "user1"
 
-    httpx_mock.add_response(
-        url=URL,
-        json={"errors": [error]},
-        status_code=200,
-    )
+    for _ in range(3):
+        httpx_mock.add_response(
+            url=URL,
+            json={"errors": [error]},
+            status_code=200,
+        )
 
     with pytest.raises(ServiceUnavailableError, match=str(error["message"])) as exc_info:
         await client.get(URL)

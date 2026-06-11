@@ -6,6 +6,8 @@ import math
 import random
 import re
 import time
+from http.cookiejar import Cookie
+from urllib.parse import urlparse
 
 import bs4
 import httpx
@@ -16,9 +18,39 @@ class XClIdError(Exception):
     pass
 
 
-def _make_client() -> httpx.AsyncClient:
-    headers = {"user-agent": UserAgent().chrome}
-    return httpx.AsyncClient(headers=headers, follow_redirects=True)
+def _make_client(
+    proxy: str | None = None,
+    user_agent: str | None = None,
+    cookies: dict[str, str] | None = None,
+) -> httpx.AsyncClient:
+    headers = {"user-agent": user_agent or UserAgent().chrome}
+    client = httpx.AsyncClient(headers=headers, follow_redirects=True, proxy=proxy)
+    if cookies:
+        for key, value in cookies.items():
+            client.cookies.jar.set_cookie(_make_secure_x_cookie(key, value))
+    return client
+
+
+def _make_secure_x_cookie(name: str, value: str) -> Cookie:
+    return Cookie(
+        version=0,
+        name=name,
+        value=value,
+        port=None,
+        port_specified=False,
+        domain=".x.com",
+        domain_specified=True,
+        domain_initial_dot=True,
+        path="/",
+        path_specified=True,
+        secure=True,
+        expires=None,
+        discard=True,
+        comment=None,
+        comment_url=None,
+        rest={},
+        rfc2109=False,
+    )
 
 
 async def get_tw_page_text(url: str, clt: httpx.AsyncClient | None = None):
@@ -81,6 +113,15 @@ def _normalize_asset_url(url: str) -> str:
         return f"https:{url}"
 
     return url
+
+
+def _is_allowed_script_url(url: str) -> bool:
+    parsed = urlparse(url)
+    if parsed.scheme != "https":
+        return False
+
+    host = (parsed.hostname or "").lower()
+    return host in {"x.com", "twitter.com", "abs.twimg.com"}
 
 
 def _parse_current_html_scripts(text: str):
@@ -290,7 +331,7 @@ async def parse_anim_idx(text: str, clt: httpx.AsyncClient | None = None) -> lis
     scripts = list(get_scripts_list(text))
     preferred_scripts = [x for x in scripts if "/ondemand.s." in x]
     fallback_scripts = [x for x in scripts if x not in preferred_scripts]
-    scripts = preferred_scripts + fallback_scripts
+    scripts = [x for x in preferred_scripts + fallback_scripts if _is_allowed_script_url(x)]
     if not scripts:
         raise XClIdError("Couldn't get XClientTxId scripts")
 
@@ -342,9 +383,14 @@ async def load_keys(
 
 class XClIdGen:
     @staticmethod
-    async def create(clt: httpx.AsyncClient | None = None) -> "XClIdGen":
+    async def create(
+        clt: httpx.AsyncClient | None = None,
+        proxy: str | None = None,
+        user_agent: str | None = None,
+        cookies: dict[str, str] | None = None,
+    ) -> "XClIdGen":
         owns_client = clt is None
-        clt = clt or _make_client()
+        clt = clt or _make_client(proxy=proxy, user_agent=user_agent, cookies=cookies)
         last_error: Exception | None = None
 
         try:
