@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Treat X `DeadlineExceeded` responses as transient backend failures instead of
+  cooling healthy accounts for 15 minutes.
+
 ## v0.19.5 - 2026-05-28
 
 ### Fixed
