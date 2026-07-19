@@ -1,11 +1,20 @@
 # Changelog
 
-## Unreleased
+## v0.19.7 - 2026-07-19
 
 ### Fixed
 
 - Treat X `DeadlineExceeded` responses as transient backend failures instead of
   cooling healthy accounts for 15 minutes.
+
+## v0.19.6 - 2026-06-11
+
+### Fixed
+
+- Retry transient X API failures without cooling healthy accounts as unknown
+  errors.
+- Use account metadata and verified X assets when generating client transaction
+  IDs.
 
 ## v0.19.5 - 2026-05-28
 
