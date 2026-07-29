@@ -1,5 +1,6 @@
 import json
 import os
+from copy import deepcopy
 from typing import Callable
 
 import pytest
@@ -537,6 +538,32 @@ def test_parse_tweets_current_shape_without_tweet_rest_id():
     assert tweets[0].id_str == "2031000000000000002"
     assert tweets[0].rawContent == "$NVDA without rest_id"
     check_tweet(tweets[0])
+
+
+def test_retweet_original_is_not_duplicated_as_top_level_tweet():
+    tweets = list(parse_tweets(fake_rep("_issue_42").json()))
+    wrapper = next(tweet for tweet in tweets if tweet.id == 1665951747842641921)
+
+    assert wrapper.retweetedTweet is not None
+    assert all(tweet.id != wrapper.retweetedTweet.id for tweet in tweets)
+
+
+def test_retweet_original_is_kept_when_it_has_its_own_timeline_entry():
+    wrapper_entry = fake_rep("_issue_42").json()
+    wrapper = wrapper_entry["content"]["itemContent"]["tweet_results"]["result"]
+    original = deepcopy(wrapper["legacy"]["retweeted_status_result"]["result"])
+    original_id = original["rest_id"]
+    original_entry = {
+        "entryId": f"tweet-{original_id}",
+        "content": {
+            "entryType": "TimelineTimelineItem",
+            "itemContent": {"tweet_results": {"result": original}},
+        },
+    }
+
+    tweets = list(parse_tweets({"entries": [wrapper_entry, original_entry]}))
+
+    assert {tweet.id for tweet in tweets} == {1665951747842641921, int(original_id)}
 
 
 async def test_tweet_details():

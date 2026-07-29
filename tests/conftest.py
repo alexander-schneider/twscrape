@@ -32,8 +32,13 @@ async def client_fixture(pool_mock: AccountsPool):
     pool_mock._order_by = "username"
 
     for x in range(1, 3):
-        await pool_mock.add_account(f"user{x}", f"pass{x}", f"email{x}", f"email_pass{x}")
-        await pool_mock.set_active(f"user{x}", True)
+        await pool_mock.add_account(
+            f"user{x}",
+            f"pass{x}",
+            f"email{x}",
+            f"email_pass{x}",
+            cookies=f"auth_token=token{x}; ct0=csrf{x}",
+        )
 
     client = QueueClient(pool_mock, "SearchTimeline")
     yield pool_mock, client

@@ -30,6 +30,10 @@ class AccountInfo(TypedDict):
 GLOBAL_LOCK_QUEUE = "__global__"
 
 
+def has_required_cookies(cookies: dict[str, str]) -> bool:
+    return all(cookies.get(name) for name in ("auth_token", "ct0"))
+
+
 def guess_delim(line: str):
     lp, rp = tuple([x.strip() for x in line.split("username")])
     return rp[0] if not lp else lp[-1]
@@ -116,7 +120,7 @@ class AccountsPool:
             mfa_code=mfa_code,
         )
 
-        if "ct0" in account.cookies:
+        if has_required_cookies(account.cookies):
             account.active = True
 
         await self.save(account)

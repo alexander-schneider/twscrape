@@ -13,6 +13,7 @@ from twscrape.queue_client import (
     XClIdGenStore,
     is_transient_api_error,
 )
+from twscrape.xclid import XClIdAccountError, XClIdParseError
 
 DB_FILE = "/tmp/twscrape_test_queue_client.db"
 URL = "https://example.com/api"
@@ -100,6 +101,60 @@ async def test_xclid_generation_uses_account_metadata(
     assert rep is not None
     assert rep.json() == {"foo": "bar"}
     assert calls == [("user1", None, False)]
+
+
+async def test_missing_session_cookie_deactivates_and_rotates(
+    httpx_mock: HTTPXMock, client_fixture: CF
+):
+    pool, client = client_fixture
+    user1 = await pool.get("user1")
+    user1.cookies = {"ct0": "csrf1"}
+    await pool.save(user1)
+
+    httpx_mock.add_response(url=URL, json={"foo": "ok"}, status_code=200)
+    rep = await client.get(URL)
+
+    assert rep is not None
+    assert getattr(rep, "__username") == "user2"
+    assert (await pool.get("user1")).active is False
+
+
+async def test_xclid_account_error_keeps_account_active_and_rotates(
+    httpx_mock: HTTPXMock, client_fixture: CF, monkeypatch
+):
+    pool, client = client_fixture
+
+    async def fake_get(cls, acc, proxy=None, fresh=False):
+        if acc.username == "user1":
+            raise XClIdAccountError("Logged-out X web app")
+        return type("Gen", (), {"calc": lambda self, *args: "clid"})()
+
+    monkeypatch.setattr(XClIdGenStore, "get", classmethod(fake_get))
+    httpx_mock.add_response(url=URL, json={"foo": "ok"}, status_code=200)
+
+    rep = await client.get(URL)
+
+    assert rep is not None
+    assert getattr(rep, "__username") == "user2"
+    user1 = await pool.get("user1")
+    assert user1.active is True
+    assert "SearchTimeline" in user1.locks
+
+
+async def test_xclid_parse_error_aborts_without_changing_account_state(
+    client_fixture: CF, monkeypatch
+):
+    pool, client = client_fixture
+
+    async def fake_get(cls, acc, proxy=None, fresh=False):
+        raise XClIdParseError("Signing script not found")
+
+    monkeypatch.setattr(XClIdGenStore, "get", classmethod(fake_get))
+
+    assert await client.get(URL) is None
+    user1 = await pool.get("user1")
+    assert user1.active is True
+    assert "SearchTimeline" not in user1.locks
 
 
 async def test_switch_acc_on_http_error(httpx_mock: HTTPXMock, client_fixture: CF):
