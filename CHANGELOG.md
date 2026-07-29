@@ -1,5 +1,22 @@
 # Changelog
 
+## v0.19.8 - 2026-07-29
+
+### Fixed
+
+- Update X GraphQL operation IDs to the current upstream v0.19.2 values.
+- Support current `x-web`/Vite signing bundles and classify transaction-ID
+  account and parser failures separately for safe account rotation.
+- Require complete `auth_token` and `ct0` cookie sessions before activating an
+  account.
+- Avoid emitting nested retweet originals as duplicate top-level tweets while
+  preserving originals that have explicit timeline entries.
+
+### Maintenance
+
+- Keep CI on the Ruff 0.15 rule defaults until the expanded Ruff 0.16 rules are
+  adopted explicitly.
+
 ## v0.19.7 - 2026-07-19
 
 ### Fixed
