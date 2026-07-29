@@ -7,10 +7,11 @@ from urllib.parse import urlparse
 import httpx
 from httpx import AsyncClient, Response
 
-from .accounts_pool import GLOBAL_LOCK_QUEUE, Account, AccountsPool
+from .account import Account
+from .accounts_pool import GLOBAL_LOCK_QUEUE, AccountsPool, has_required_cookies
 from .logger import logger
 from .utils import utc
-from .xclid import XClIdGen
+from .xclid import XClIdAccountError, XClIdGen, XClIdParseError
 
 ReqParams = dict[str, str | int] | None
 TMP_TS = utc.now().isoformat().split(".")[0].replace("T", "_").replace(":", "-")[0:16]
@@ -366,6 +367,12 @@ class QueueClient:
             if ctx is None:
                 return None
 
+            if not has_required_cookies(ctx.acc.cookies):
+                msg = "Missing authentication cookies"
+                logger.warning(f"{msg}; username={ctx.acc.username}; queue={self.queue}")
+                await self._close_ctx(inactive=True, msg=msg)
+                continue
+
             try:
                 rep = await ctx.req(method, url, params=params, json=json)
                 setattr(rep, "__username", ctx.acc.username)
@@ -390,6 +397,14 @@ class QueueClient:
                 # retry with new account
                 unknown_retry, transport_retry, transient_api_retry = 0, 0, 0
                 continue
+            except XClIdAccountError as e:
+                logger.warning(f"{e}; username={ctx.acc.username}; queue={self.queue}")
+                await self._close_ctx(utc.ts() + UNKNOWN_API_ERROR_COOLDOWN_SECONDS)
+                continue
+            except XClIdParseError as e:
+                logger.error(f"{e}; username={ctx.acc.username}; queue={self.queue}")
+                await self._close_ctx()
+                return None
             except (
                 httpx.ReadTimeout,
                 httpx.ProxyError,

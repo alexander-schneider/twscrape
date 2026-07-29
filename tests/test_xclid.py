@@ -3,6 +3,7 @@ import pytest
 from bs4 import BeautifulSoup
 
 from twscrape.xclid import (
+    XClIdAccountError,
     XClIdError,
     XClIdGen,
     _make_client,
@@ -64,6 +65,49 @@ def test_get_scripts_list_current_xcom_html():
     assert "https://abs.twimg.com/responsive-web/client-web/vendor.d74f1a3a.js" in scripts
     assert "https://abs.twimg.com/responsive-web/client-web/main.540aea7a.js" in scripts
     assert "https://abs.twimg.com/responsive-web/client-web/ondemand.s.246a373a.js" in scripts
+
+
+def test_logged_out_x_web_entry_is_account_error():
+    html = (
+        '<script src="https://abs.twimg.com/x-web/client-web/'
+        'entry-client-logged-out-a1b2c3.js"></script>'
+    )
+
+    with pytest.raises(XClIdAccountError, match="Logged-out X web app"):
+        list(get_scripts_list(html))
+
+
+@pytest.mark.asyncio
+async def test_xclid_create_preserves_logged_out_account_error(monkeypatch):
+    class FakeResponse:
+        text = (
+            '<script src="https://abs.twimg.com/x-web/client-web/'
+            'entry-client-logged-out-a1b2c3.js"></script>'
+        )
+
+        def raise_for_status(self):
+            return None
+
+    class FakeClient:
+        def __init__(self):
+            self.requests = 0
+            self.closed = False
+
+        async def get(self, url: str):
+            self.requests += 1
+            return FakeResponse()
+
+        async def aclose(self):
+            self.closed = True
+
+    fake_client = FakeClient()
+    monkeypatch.setattr("twscrape.xclid._make_client", lambda **kwargs: fake_client)
+
+    with pytest.raises(XClIdAccountError, match="Logged-out X web app"):
+        await XClIdGen.create()
+
+    assert fake_client.requests == 1
+    assert fake_client.closed is True
 
 
 @pytest.mark.asyncio
@@ -182,6 +226,37 @@ async def test_parse_anim_idx_falls_back_to_main_bundle_when_ondemand_missing(mo
     monkeypatch.setattr("twscrape.xclid.get_tw_page_text", fake_get_tw_page_text)
 
     assert await parse_anim_idx(html) == [7]
+
+
+@pytest.mark.asyncio
+async def test_parse_anim_idx_follows_x_web_signing_chunk(monkeypatch):
+    html = """
+    <html>
+      <head>
+        <link rel="modulepreload" href="https://abs.twimg.com/x-web/client-web/chunks/vendor.js" />
+        <script type="module" src="https://abs.twimg.com/x-web/client-web/entry-client-a1b2c3.js"></script>
+      </head>
+    </html>
+    """
+    assets = {
+        "https://abs.twimg.com/x-web/client-web/chunks/vendor.js": "window.vendor = true",
+        "https://abs.twimg.com/x-web/client-web/entry-client-a1b2c3.js": (
+            'import("./chunks/sign.o-abc123.js")'
+        ),
+        "https://abs.twimg.com/x-web/client-web/chunks/sign.o-abc123.js": (
+            "const indices = [(a[4], 16), (a[32], 16), (a[25], 16), (a[42], 16)]"
+        ),
+    }
+    calls = []
+
+    async def fake_get_tw_page_text(url: str, clt=None):
+        calls.append(url)
+        return assets[url]
+
+    monkeypatch.setattr("twscrape.xclid.get_tw_page_text", fake_get_tw_page_text)
+
+    assert await parse_anim_idx(html) == [4, 32, 25, 42]
+    assert "https://abs.twimg.com/x-web/client-web/chunks/sign.o-abc123.js" in calls
 
 
 @pytest.mark.asyncio

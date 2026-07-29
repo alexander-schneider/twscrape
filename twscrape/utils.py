@@ -124,6 +124,29 @@ def get_typed_object(obj: dict, res: defaultdict[str, list]):
     return res
 
 
+def _get_timeline_tweet_ids(obj: Any) -> set[str]:
+    ids: set[str] = set()
+    if isinstance(obj, dict):
+        entry_id = obj.get("entryId")
+        if isinstance(entry_id, str):
+            if entry_id.startswith("tweet-"):
+                candidate = entry_id.removeprefix("tweet-")
+            elif "-tweet-" in entry_id:
+                candidate = entry_id.rsplit("-tweet-", 1)[1]
+            else:
+                candidate = ""
+            if candidate.isdigit():
+                ids.add(candidate)
+
+        for value in obj.values():
+            ids.update(_get_timeline_tweet_ids(value))
+    elif isinstance(obj, list):
+        for value in obj:
+            ids.update(_get_timeline_tweet_ids(value))
+
+    return ids
+
+
 def _merge_legacy(base: dict, legacy) -> dict:
     out = dict(base)
     if isinstance(legacy, dict):
@@ -234,7 +257,8 @@ def to_old_obj(obj: dict):
     return _flatten_tweet_v2(obj)
 
 
-def to_old_rep(obj: dict) -> dict[str, dict]:
+def to_old_rep(obj: dict) -> dict[str, Any]:
+    timeline_tweet_ids = _get_timeline_tweet_ids(obj)
     tmp = get_typed_object(obj, defaultdict(list))
 
     tweets = {}
@@ -263,7 +287,24 @@ def to_old_rep(obj: dict) -> dict[str, dict]:
     trends = [x for x in tmp.get("TimelineTrend", [])]
     trends = {x["name"]: x for x in trends}
 
-    return {"tweets": tweets, "users": users, "trends": trends}
+    retweeted_ids = {
+        str(retweeted_id)
+        for tweet in tweets.values()
+        for path in (
+            "retweeted_status_id_str",
+            "retweeted_status_result.result.rest_id",
+            "retweeted_status_result.result.tweet.rest_id",
+        )
+        if (retweeted_id := get_or(tweet, path)) is not None
+    }
+
+    return {
+        "tweets": tweets,
+        "retweeted_ids": retweeted_ids,
+        "timeline_tweet_ids": timeline_tweet_ids,
+        "users": users,
+        "trends": trends,
+    }
 
 
 def print_table(rows: list[dict], hr_after=False):

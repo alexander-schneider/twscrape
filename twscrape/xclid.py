@@ -7,7 +7,7 @@ import random
 import re
 import time
 from http.cookiejar import Cookie
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import bs4
 import httpx
@@ -15,6 +15,14 @@ from fake_useragent import UserAgent
 
 
 class XClIdError(Exception):
+    pass
+
+
+class XClIdAccountError(XClIdError):
+    pass
+
+
+class XClIdParseError(XClIdError):
     pass
 
 
@@ -102,7 +110,7 @@ def _parse_legacy_scripts_map(scripts: str):
             )
             data = json.loads(fixed_scripts)
         except Exception:
-            raise XClIdError("Failed to parse scripts") from e
+            raise XClIdParseError("Failed to parse scripts") from e
 
     for k, v in data.items():
         yield script_url(k, f"{v}a")
@@ -127,6 +135,11 @@ def _is_allowed_script_url(url: str) -> bool:
 def _parse_current_html_scripts(text: str):
     soup = bs4.BeautifulSoup(text, "html.parser")
     seen: set[str] = set()
+
+    for url in re.findall(r"https://[\w.-]+/x-web/[\w./-]+\.js", text):
+        if _is_allowed_script_url(url) and url not in seen:
+            seen.add(url)
+            yield url
 
     for tag in soup.select("script[src], link[as='script'][href]"):
         url = tag.get("src") or tag.get("href")
@@ -177,10 +190,12 @@ def get_scripts_list(text: str):
             seen.add(url)
 
     if urls:
+        if any("/entry-client-logged-out" in url for url in urls):
+            raise XClIdAccountError("Logged-out X web app")
         yield from urls
         return
 
-    raise XClIdError("Failed to parse scripts")
+    raise XClIdParseError("Failed to parse scripts")
 
 
 # MARK: XClientTxId parsing
@@ -194,6 +209,7 @@ def get_scripts_list(text: str):
 
 
 INDICES_REGEX = re.compile(r"(\(\w{1}\[(\d{1,2})\],\s*16\))+", flags=(re.VERBOSE | re.MULTILINE))
+INDICES_FILE_RE = re.compile(r"(?:\.{0,2}/)?[\w./-]*?\b(?:ondemand\.s|sign\.o)[\w.-]*\.js")
 
 
 class Cubic:  # cubic_curve.py
@@ -322,18 +338,18 @@ def parse_vk_bytes(soup: bs4.BeautifulSoup) -> list[int]:
     el = soup.find("meta", {"name": "twitter-site-verification", "content": True})
     el = str(el.get("content")) if el and isinstance(el, bs4.Tag) else None
     if not el:
-        raise XClIdError("Couldn't get XClientTxId key bytes")
+        raise XClIdParseError("Couldn't get XClientTxId key bytes")
 
     return list(base64.b64decode(bytes(el, "utf-8")))
 
 
 async def parse_anim_idx(text: str, clt: httpx.AsyncClient | None = None) -> list[int]:
     scripts = list(get_scripts_list(text))
-    preferred_scripts = [x for x in scripts if "/ondemand.s." in x]
+    preferred_scripts = [x for x in scripts if INDICES_FILE_RE.search(x)]
     fallback_scripts = [x for x in scripts if x not in preferred_scripts]
     scripts = [x for x in preferred_scripts + fallback_scripts if _is_allowed_script_url(x)]
     if not scripts:
-        raise XClIdError("Couldn't get XClientTxId scripts")
+        raise XClIdParseError("Couldn't get XClientTxId scripts")
 
     last_error: Exception | None = None
     for script_url in scripts:
@@ -342,11 +358,21 @@ async def parse_anim_idx(text: str, clt: httpx.AsyncClient | None = None) -> lis
             items = [int(x.group(2)) for x in INDICES_REGEX.finditer(script_text)]
             if items:
                 return items
+
+            indices_match = INDICES_FILE_RE.search(script_text)
+            if indices_match:
+                indices_url = urljoin(script_url, indices_match.group(0))
+                if not _is_allowed_script_url(indices_url):
+                    continue
+                indices_text = await get_tw_page_text(indices_url, clt=clt)
+                items = [int(x.group(2)) for x in INDICES_REGEX.finditer(indices_text)]
+                if items:
+                    return items
         except Exception as e:
             last_error = e
             continue
 
-    raise XClIdError("Couldn't get XClientTxId indices") from last_error
+    raise XClIdParseError("Couldn't get XClientTxId indices") from last_error
 
 
 def parse_anim_arr(soup: bs4.BeautifulSoup, vk_bytes: list[int]) -> list[list[float]]:
@@ -354,7 +380,7 @@ def parse_anim_arr(soup: bs4.BeautifulSoup, vk_bytes: list[int]) -> list[list[fl
     els = list(soup.select("svg[id^='loading-x-anim'] g:first-child path:nth-child(2)"))
     els = [str(x.get("d") or "").strip() for x in els]
     if not els:
-        raise XClIdError("Couldn't get XClientTxId animation array")
+        raise XClIdParseError("Couldn't get XClientTxId animation array")
 
     idx = vk_bytes[5] % len(els)
     dat = els[idx][9:].split("C")
@@ -400,6 +426,8 @@ class XClIdGen:
                     soup = bs4.BeautifulSoup(text, "html.parser")
                     vk_bytes, anim_key = await load_keys(text, soup, clt=clt)
                     return XClIdGen(vk_bytes, anim_key)
+                except XClIdAccountError:
+                    raise
                 except (httpx.HTTPError, XClIdError) as e:
                     last_error = e
                     await asyncio.sleep(1)
@@ -407,6 +435,10 @@ class XClIdGen:
             if owns_client:
                 await clt.aclose()
 
+        if isinstance(last_error, XClIdParseError):
+            raise XClIdParseError(
+                "Couldn't initialize XClient transaction id generator"
+            ) from last_error
         raise XClIdError("Couldn't initialize XClient transaction id generator") from last_error
 
     def __init__(self, vk_bytes: list[int], anim_key: str):

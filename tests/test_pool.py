@@ -36,6 +36,16 @@ async def test_add_accounts(pool_mock: AccountsPool):
     assert acc.email_password == "email_pass2"
 
 
+async def test_cookie_account_requires_complete_session(pool_mock: AccountsPool):
+    await pool_mock.add_account("missing-auth", "pass", "email", "email_pass", cookies="ct0=csrf")
+    await pool_mock.add_account(
+        "complete", "pass", "email", "email_pass", cookies="auth_token=token; ct0=csrf"
+    )
+
+    assert (await pool_mock.get("missing-auth")).active is False
+    assert (await pool_mock.get("complete")).active is True
+
+
 async def test_delete_accounts_handles_special_username(pool_mock: AccountsPool):
     username = 'bad"name'
     await pool_mock.add_account(username, "pass1", "email1", "email_pass1")
