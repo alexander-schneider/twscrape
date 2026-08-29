@@ -157,7 +157,9 @@ async def test_xclid_parse_error_aborts_without_changing_account_state(
     assert "SearchTimeline" not in user1.locks
 
 
-async def test_switch_acc_on_http_error(httpx_mock: HTTPXMock, client_fixture: CF):
+async def test_ambiguous_json_403_cools_account_without_deactivation(
+    httpx_mock: HTTPXMock, client_fixture: CF
+):
     pool, client = client_fixture
 
     # locked account on enter
@@ -175,12 +177,34 @@ async def test_switch_acc_on_http_error(httpx_mock: HTTPXMock, client_fixture: C
 
     locked2 = await get_locked(pool)
     assert len(locked2) == 2
+    user1 = await pool.get("user1")
+    assert user1.active is True
+    assert user1.error_msg is None
 
     # unlock on exit (failed account still should locked)
     await client.__aexit__(None, None, None)
     locked3 = await get_locked(pool)
     assert len(locked3) == 1
     assert locked1 == locked3  # failed account locked
+
+
+async def test_explicit_auth_error_deactivates_account(httpx_mock: HTTPXMock, client_fixture: CF):
+    pool, client = client_fixture
+
+    httpx_mock.add_response(
+        url=URL,
+        json={"errors": [{"code": 32, "message": "Could not authenticate you"}]},
+        status_code=401,
+    )
+    httpx_mock.add_response(url=URL, json={"foo": "ok"}, status_code=200)
+
+    rep = await client.get(URL)
+
+    assert rep is not None
+    assert getattr(rep, "__username") == "user2"
+    user1 = await pool.get("user1")
+    assert user1.active is False
+    assert user1.error_msg == "(32) Could not authenticate you"
 
 
 async def test_retry_with_same_acc_on_network_error(httpx_mock: HTTPXMock, client_fixture: CF):
