@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.19.9 - 2026-08-29
+
+- Keep accounts active after ambiguous JSON HTTP 403 responses and cool only the
+  affected queue before rotating. Explicit authentication and access-control
+  errors still deactivate the account.
+
 ## v0.19.8 - 2026-07-29
 
 ### Fixed

@@ -294,8 +294,11 @@ class QueueClient:
             )
 
         if err_msg == "OK" and rep.status_code == 403:
-            logger.warning(f"Session expired or banned: {log_msg}")
-            await self._close_ctx(-1, inactive=True, msg=None)
+            logger.warning(
+                f"Ambiguous forbidden response: {log_msg}. "
+                f"Cooling queue for {UNKNOWN_API_ERROR_COOLDOWN_SECONDS}s"
+            )
+            await self._close_ctx(utc.ts() + UNKNOWN_API_ERROR_COOLDOWN_SECONDS)
             raise HandledError()
 
         # something from twitter side - abort all queries, see: https://github.com/vladkens/twscrape/pull/80
