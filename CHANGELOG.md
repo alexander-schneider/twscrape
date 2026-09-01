@@ -1,5 +1,25 @@
 # Changelog
 
+## v0.20.1 - 2026-09-01
+
+### Added
+
+- Add cookie-only account creation and session refresh through the API and CLI
+  while preserving existing credentials, proxy settings, statistics, and locks.
+- Add configurable, bounded account waiting with `wait_timeout` and
+  `wait_interval`.
+
+### Fixed
+
+- Update existing X GraphQL operation IDs to upstream v0.20.1 and parse current
+  user-profile fields, including responses without the legacy profile key.
+- Stop repeated pagination cursors and pages without dropping a newly fetched
+  page.
+- Retry all `httpx` transport errors and LoadShed responses with bounded backoff
+  before cooling or rotating accounts.
+- Preserve usable GraphQL data alongside fully parsed warnings, while failing
+  closed on malformed or unknown error payloads without trusted data.
+
 ## v0.19.9 - 2026-08-29
 
 - Keep accounts active after ambiguous JSON HTTP 403 responses and cool only the
