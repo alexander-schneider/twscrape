@@ -276,6 +276,7 @@ class QueueClient:
         # limit_max = int(rep.headers.get("x-rate-limit-limit", -1))
 
         errors: list[str] = []
+        malformed_errors = False
         error_payload = res.get("errors") if isinstance(res, dict) else None
         if isinstance(error_payload, list):
             errors = [
@@ -284,9 +285,11 @@ class QueueClient:
                 if isinstance(item, dict) and "message" in item
             ]
             if error_payload and len(errors) != len(error_payload):
+                malformed_errors = True
                 errors.append("(-1) Malformed API errors payload")
             errors = list(dict.fromkeys(errors))
         elif error_payload:
+            malformed_errors = True
             errors = ["(-1) Malformed API errors payload"]
 
         err_msg = "; ".join(errors) or "OK"
@@ -359,7 +362,7 @@ class QueueClient:
             return
 
         if err_msg != "OK":
-            if has_data(rep, res):
+            if has_data(rep, res) and not malformed_errors:
                 LogOnce.throttled(
                     log_key,
                     "DEBUG",
