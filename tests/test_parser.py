@@ -310,7 +310,6 @@ def test_parse_users_current_shape_without_graphql_id():
                 "result": {
                     "__typename": "User",
                     "rest_id": "2030572972407435264",
-                    "legacy": None,
                     "core": {
                         "created_at": "Sun Mar 08 09:14:58 +0000 2026",
                         "name": "Shauna Fatora",

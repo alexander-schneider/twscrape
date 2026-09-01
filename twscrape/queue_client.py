@@ -9,19 +9,24 @@ from httpx import AsyncClient, Response
 
 from .account import Account
 from .accounts_pool import GLOBAL_LOCK_QUEUE, AccountsPool, has_required_cookies
-from .logger import logger
+from .logger import LogOnce, logger
 from .utils import utc
 from .xclid import XClIdAccountError, XClIdGen, XClIdParseError
 
 ReqParams = dict[str, str | int] | None
 TMP_TS = utc.now().isoformat().split(".")[0].replace("T", "_").replace(":", "-")[0:16]
 LOADSHED_COOLDOWN_SECONDS = 120
+LOADSHED_RETRY_LIMIT = 3
+TRANSPORT_ERROR_COOLDOWN_SECONDS = 60
 TRANSPORT_ERROR_RETRY_LIMIT = 3
 TRANSIENT_API_ERROR_RETRY_LIMIT = 3
 UNKNOWN_API_ERROR_COOLDOWN_SECONDS = 60 * 15
 
 
 class HandledError(Exception): ...
+
+
+class RetryReqError(Exception): ...
 
 
 class AbortReqError(Exception): ...
@@ -62,6 +67,18 @@ def is_html_edge_block(rep: Response, res: Any) -> bool:
 
 def is_transient_api_error(err_msg: str) -> bool:
     return any(fragment in err_msg for fragment in TRANSIENT_API_ERROR_FRAGMENTS)
+
+
+def has_data(rep: Response, res: Any) -> bool:
+    if rep.status_code != 200 or not isinstance(res, dict):
+        return False
+
+    data = res.get("data")
+    return isinstance(data, dict) and any(value is not None for value in data.values())
+
+
+def has_error(errors: list[str], prefix: str) -> bool:
+    return any(error.startswith(prefix) for error in errors)
 
 
 class XClIdGenStore:
@@ -107,6 +124,17 @@ class Ctx:
         self.acc = acc
         self.clt = clt
         self.proxy = proxy
+        self.failures = {"transport": 0, "loadshed": 0}
+
+    async def retry(self, kind: str, limit: int) -> bool:
+        self.failures[kind] += 1
+        if self.failures[kind] >= limit:
+            return False
+        await asyncio.sleep(2 ** self.failures[kind])
+        return True
+
+    def reset_failures(self):
+        self.failures = {"transport": 0, "loadshed": 0}
 
     async def aclose(self):
         await self.clt.aclose()
@@ -247,16 +275,23 @@ class QueueClient:
         limit_reset = int(rep.headers.get("x-rate-limit-reset", -1))
         # limit_max = int(rep.headers.get("x-rate-limit-limit", -1))
 
-        err_msg = "OK"
-        if "errors" in res:
-            err_msg = set([f"({x.get('code', -1)}) {x['message']}" for x in res["errors"]])
-            err_msg = "; ".join(list(err_msg))
+        errors: list[str] = []
+        if isinstance(res, dict) and isinstance(res.get("errors"), list):
+            errors = [
+                f"({item.get('code', -1)}) {item['message']}"
+                for item in res["errors"]
+                if isinstance(item, dict) and "message" in item
+            ]
+            errors = list(dict.fromkeys(errors))
+
+        err_msg = "; ".join(errors) or "OK"
+        log_key = (self.queue, rep.status_code, frozenset(errors))
 
         log_msg = f"{rep.status_code:3d} - {req_id(rep)} - {err_msg}"
         logger.trace(log_msg)
 
         # for dev: need to add some features in api.py
-        if err_msg.startswith("(336) The following features cannot be null"):
+        if has_error(errors, "(336) The following features cannot be null"):
             raise ApiFeatureUpdateRequiredError(
                 "X rejected the configured GraphQL feature flags. "
                 f"Update twscrape/api.py and retry. Details: {err_msg}"
@@ -269,17 +304,17 @@ class QueueClient:
             raise HandledError()
 
         # no way to check is account banned in direct way, but this check should work
-        if err_msg.startswith("(88) Rate limit exceeded") and limit_remaining > 0:
+        if has_error(errors, "(88) Rate limit exceeded") and limit_remaining > 0:
             logger.warning(f"Ban detected: {log_msg}")
             await self._close_ctx(-1, inactive=True, msg=err_msg)
             raise HandledError()
 
-        if err_msg.startswith("(326) Authorization: Denied by access control"):
+        if has_error(errors, "(326) Authorization: Denied by access control"):
             logger.warning(f"Ban detected: {log_msg}")
             await self._close_ctx(-1, inactive=True, msg=err_msg)
             raise HandledError()
 
-        if err_msg.startswith("(32) Could not authenticate you"):
+        if has_error(errors, "(32) Could not authenticate you"):
             logger.warning(f"Session expired or banned: {log_msg}")
             await self._close_ctx(-1, inactive=True, msg=err_msg)
             raise HandledError()
@@ -302,12 +337,10 @@ class QueueClient:
             raise HandledError()
 
         # something from twitter side - abort all queries, see: https://github.com/vladkens/twscrape/pull/80
-        if err_msg.startswith("(131) Dependency: Internal error"):
+        if has_error(errors, "(131) Dependency: Internal error"):
             # looks like when data exists, we can ignore this error
             # https://github.com/vladkens/twscrape/issues/166
-            if rep.status_code == 200 and "data" in res and "user" in res["data"]:
-                err_msg = "OK"
-            else:
+            if not has_data(rep, res):
                 logger.warning(f"Dependency error (request skipped): {err_msg}")
                 raise AbortReqError()
 
@@ -320,17 +353,31 @@ class QueueClient:
             logger.warning(f"Authorization unknown error: {log_msg}")
             return
 
-        if "LoadShed" in err_msg:
-            logger.warning(
-                f"LoadShed detected: {log_msg}. Cooling account for {LOADSHED_COOLDOWN_SECONDS}s"
-            )
-            await self._close_ctx(
-                utc.ts() + LOADSHED_COOLDOWN_SECONDS,
-                global_lock=True,
-            )
-            raise HandledError()
-
         if err_msg != "OK":
+            if has_data(rep, res):
+                LogOnce.throttled(
+                    log_key,
+                    "DEBUG",
+                    f"API warning with data: {rep.status_code:3d} - {self.queue} - {err_msg}",
+                )
+                return
+
+            if has_error(errors, "(-1) LoadShed"):
+                logger.warning(f"LoadShed detected: {log_msg}")
+                ctx = self.ctx
+                if ctx is not None and await ctx.retry("loadshed", LOADSHED_RETRY_LIMIT):
+                    raise RetryReqError()
+
+                logger.warning(
+                    f"LoadShed persisted: {log_msg}. "
+                    f"Cooling account for {LOADSHED_COOLDOWN_SECONDS}s"
+                )
+                await self._close_ctx(
+                    utc.ts() + LOADSHED_COOLDOWN_SECONDS,
+                    global_lock=True,
+                )
+                raise HandledError()
+
             if is_transient_api_error(err_msg):
                 logger.warning(f"Transient X API error detected: {log_msg}")
                 raise ServiceUnavailableError(
@@ -363,7 +410,7 @@ class QueueClient:
         params: ReqParams = None,
         json: Any = None,
     ) -> Response | None:
-        unknown_retry, transport_retry, transient_api_retry = 0, 0, 0
+        unknown_retry, transient_api_retry = 0, 0
 
         while True:
             ctx = await self._get_ctx()  # not need to close client, class implements __aexit__
@@ -382,7 +429,8 @@ class QueueClient:
                 await self._check_rep(rep)
 
                 ctx.req_count += 1  # count only successful
-                unknown_retry, transport_retry, transient_api_retry = 0, 0, 0
+                ctx.reset_failures()
+                unknown_retry, transient_api_retry = 0, 0
                 return rep
             except AbortReqError:
                 # abort all queries
@@ -396,9 +444,11 @@ class QueueClient:
                 await asyncio.sleep(1)
             except UnexpectedApiError:
                 raise
+            except RetryReqError:
+                continue
             except HandledError:
                 # retry with new account
-                unknown_retry, transport_retry, transient_api_retry = 0, 0, 0
+                unknown_retry, transient_api_retry = 0, 0
                 continue
             except XClIdAccountError as e:
                 logger.warning(f"{e}; username={ctx.acc.username}; queue={self.queue}")
@@ -414,11 +464,17 @@ class QueueClient:
                 httpx.ConnectError,
                 httpx.ConnectTimeout,
             ) as e:
-                # http transport failed, just retry with same account
-                transport_retry += 1
-                if transport_retry >= TRANSPORT_ERROR_RETRY_LIMIT:
-                    raise e
-                await asyncio.sleep(1)
+                if await ctx.retry("transport", TRANSPORT_ERROR_RETRY_LIMIT):
+                    continue
+
+                logger.warning(
+                    f"Transport error; username={ctx.acc.username}; queue={self.queue}; "
+                    f"error={type(e).__name__}: {e}. "
+                    f"Cooling account for {TRANSPORT_ERROR_COOLDOWN_SECONDS}s"
+                )
+                await self._close_ctx(utc.ts() + TRANSPORT_ERROR_COOLDOWN_SECONDS)
+                unknown_retry, transient_api_retry = 0, 0
+                continue
             except Exception as e:
                 unknown_retry += 1
                 if unknown_retry >= 3:

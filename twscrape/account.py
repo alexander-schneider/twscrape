@@ -3,6 +3,7 @@ import os
 import sqlite3
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
+from typing import Literal
 
 from httpx import AsyncClient, AsyncHTTPTransport
 
@@ -29,6 +30,14 @@ class Account(JSONTrait):
     error_msg: str | None = None
     last_used: datetime | None = None
     _tx: str | None = None
+
+    @property
+    def has_session(self) -> bool:
+        return all(self.cookies.get(name) for name in ("auth_token", "ct0"))
+
+    @property
+    def login_method(self) -> Literal["cookies", "password"]:
+        return "cookies" if self.password == "_" else "password"
 
     @staticmethod
     def from_rs(rs: sqlite3.Row):

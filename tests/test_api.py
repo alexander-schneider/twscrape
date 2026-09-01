@@ -41,25 +41,25 @@ def load_raw_search() -> dict:
     return json.loads(RAW_SEARCH_PATH.read_text())
 
 
-def test_gql_operation_ids_match_upstream_v0_19_2():
+def test_gql_operation_ids_match_upstream_v0_20_1():
     assert {
         name: getattr(api_module, name) for name in dir(api_module) if name.startswith("OP_")
     } == {
-        "OP_BlueVerifiedFollowers": "94iKIFXsW369GcGrPaEBcA/BlueVerifiedFollowers",
-        "OP_Bookmarks": "LoLaMO4GuHLEPJOhH9kjAw/Bookmarks",
-        "OP_Followers": "18SNsfvwgu2CYIweeUVHAw/Followers",
-        "OP_Following": "PEIBUtChvR2i_NZCxbK3fA/Following",
-        "OP_GenericTimelineById": "GswYtMwzaFKSDx_SvC-f6g/GenericTimelineById",
-        "OP_ListLatestTweetsTimeline": "LV64djPRhnsVhGCK76s13w/ListLatestTweetsTimeline",
-        "OP_Retweeters": "eio_KeZrPr83caqxWGNtiw/Retweeters",
-        "OP_SearchTimeline": "hz_94eVAtrtQo_vO3my7Rw/SearchTimeline",
-        "OP_TweetDetail": "rZA6K31W4E90vZKBmxXV3g/TweetDetail",
-        "OP_UserByRestId": "DaeC_2LfMgwCujE03HSZtw/UserByRestId",
-        "OP_UserByScreenName": "2qvSHpkWTMS9i0zJAwDNiA/UserByScreenName",
-        "OP_UserCreatorSubscriptions": "qhT9BsaNXNYh4R-e1REj7Q/UserCreatorSubscriptions",
-        "OP_UserMedia": "IS3w9vvPg1SJysLErvnFGg/UserMedia",
-        "OP_UserTweets": "6r5OLCC_wFH4CpRyXKuAmQ/UserTweets",
-        "OP_UserTweetsAndReplies": "klja8a2iJX_3to5RdfVlgw/UserTweetsAndReplies",
+        "OP_BlueVerifiedFollowers": "u3PkPbg--arppBcwNbF1ig/BlueVerifiedFollowers",
+        "OP_Bookmarks": "iblrFnKr6PZUR-dWpfXG6g/Bookmarks",
+        "OP_Followers": "JNyQdTISpzCkj_1fqxDvFg/Followers",
+        "OP_Following": "qGZZDF3mp91q7X22s3HxpA/Following",
+        "OP_GenericTimelineById": "ee4dBLWL8a8qg6n19m1htQ/GenericTimelineById",
+        "OP_ListLatestTweetsTimeline": "1LE3u14FJjPZUHKFGzos2g/ListLatestTweetsTimeline",
+        "OP_Retweeters": "ROjiuYueotTnWoI8m2YaiQ/Retweeters",
+        "OP_SearchTimeline": "hyPfJYJ_XAtDYoslQc-Rgg/SearchTimeline",
+        "OP_TweetDetail": "XMOz5h24KAZ86qKffKTLdQ/TweetDetail",
+        "OP_UserByRestId": "xvmVfRLmnr1alc5f2dib0Q/UserByRestId",
+        "OP_UserByScreenName": "Gb-d6r0vxPOADdG62OEBpQ/UserByScreenName",
+        "OP_UserCreatorSubscriptions": "Qxe_gd-ZvdofnzSL8Ngzpw/UserCreatorSubscriptions",
+        "OP_UserMedia": "VyudDWQnr9vJNw7GasFz2g/UserMedia",
+        "OP_UserTweets": "SXVCYB8XHSS25nzIljNtZA/UserTweets",
+        "OP_UserTweetsAndReplies": "qUpkZU6eN8MbtQb7rC_pYg/UserTweetsAndReplies",
     }
 
 
@@ -193,6 +193,41 @@ async def test_gql_items_stops_on_repeated_search_page(api_mock: API, monkeypatc
     assert len(reps) == 1
     assert len(calls) == 2
     assert all(x[0] == "post" for x in calls)
+
+
+async def test_gql_items_stops_on_repeated_cursor_for_other_timelines(api_mock: API, monkeypatch):
+    pages = [
+        DummyResponse(make_search_page(["tweet-1"], "cursor-1")),
+        DummyResponse(make_search_page(["tweet-2"], "cursor-1")),
+        DummyResponse(make_search_page(["tweet-3"], None)),
+    ]
+    calls = []
+
+    class FakeQueueClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            return None
+
+        async def get(self, url, params=None):
+            calls.append((url, params))
+            if not pages:
+                raise AssertionError("unexpected extra pagination request")
+            return pages.pop(0)
+
+        async def post(self, url, json=None):
+            raise AssertionError("Following should use GET")
+
+    monkeypatch.setattr(api_module, "QueueClient", FakeQueueClient)
+
+    reps = await gather(api_mock._gql_items(api_module.OP_Following, {"userId": "123"}))
+
+    assert len(reps) == 2
+    assert len(calls) == 2
 
 
 async def test_gql_items_continues_past_empty_search_pages(api_mock: API, monkeypatch):
