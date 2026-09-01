@@ -423,6 +423,25 @@ async def test_unknown_api_errors_fail_closed_and_cool_account(
     assert getattr(rep, "__username", None) == "user2"
 
 
+async def test_malformed_api_errors_fail_closed_without_data(
+    httpx_mock: HTTPXMock, client_fixture: CF
+):
+    pool, client = client_fixture
+
+    await client.__aenter__()
+    assert client.ctx is not None
+    assert client.ctx.acc.username == "user1"
+
+    httpx_mock.add_response(url=URL, json={"errors": [{"code": 999}]}, status_code=200)
+
+    with pytest.raises(UnexpectedApiError, match="Malformed API errors payload"):
+        await client.get(URL)
+
+    assert client.ctx is None
+    user1 = await pool.get("user1")
+    assert "SearchTimeline" in user1.locks
+
+
 async def test_service_unavailable_raises_typed_error_without_cooling_account_after_retries(
     httpx_mock: HTTPXMock, client_fixture: CF, monkeypatch
 ):
