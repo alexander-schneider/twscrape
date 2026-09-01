@@ -1,4 +1,5 @@
 import asyncio
+import json
 import sqlite3
 import uuid
 from datetime import datetime, timezone
@@ -21,6 +22,7 @@ class NoAccountError(Exception):
 class AccountInfo(TypedDict):
     username: str
     logged_in: bool
+    login_method: str
     active: bool
     last_used: datetime | None
     total_req: int
@@ -48,10 +50,14 @@ class AccountsPool:
         db_file="accounts.db",
         login_config: LoginConfig | None = None,
         raise_when_no_account=False,
+        wait_timeout: float | None = None,
+        wait_interval: float = 5.0,
     ):
         self._db_file = db_file
         self._login_config = login_config or LoginConfig()
         self._raise_when_no_account = raise_when_no_account
+        self._wait_timeout = wait_timeout
+        self._wait_interval = wait_interval
 
     def _usernames_where(self, usernames: list[str]) -> tuple[str, dict[str, str]]:
         placeholders = []
@@ -125,6 +131,28 @@ class AccountsPool:
 
         await self.save(account)
         logger.info(f"Account {username} added successfully (active={account.active})")
+
+    async def add_account_cookies(self, username: str, cookies: str):
+        parsed = parse_cookies(cookies)
+        if not has_required_cookies(parsed):
+            raise ValueError("Cookies must include auth_token and ct0")
+
+        qs = """
+        INSERT INTO accounts (username, password, email, email_password, user_agent, active, cookies)
+        VALUES (:username, '_', '_', '_', :user_agent, true, :cookies)
+        ON CONFLICT(username) DO UPDATE SET
+            cookies = excluded.cookies,
+            headers = '{}',
+            active = true,
+            error_msg = NULL
+        """
+        params = {
+            "username": username,
+            "user_agent": UserAgent().safari,
+            "cookies": json.dumps(parsed),
+        }
+        await execute(self._db_file, qs, params)
+        logger.info(f"Cookies for account {username} updated successfully")
 
     async def delete_accounts(self, usernames: str | list[str]):
         usernames = usernames if isinstance(usernames, list) else [usernames]
@@ -204,6 +232,7 @@ class AccountsPool:
 
         rs = await fetchall(self._db_file, qs, params)
         accounts = [Account.from_rs(rs) for rs in rs]
+        accounts = [account for account in accounts if account.login_method == "password"]
         # await asyncio.gather(*[login(x) for x in self.accounts])
 
         counter = {"total": len(accounts), "success": 0, "failed": 0}
@@ -231,7 +260,7 @@ class AccountsPool:
             headers = json_object(),
             cookies = json_object(),
             user_agent = :user_agent
-        WHERE username IN ({placeholders})
+        WHERE username IN ({placeholders}) AND password != '_'
         """
 
         await execute(self._db_file, qs, params)
@@ -317,30 +346,42 @@ class AccountsPool:
         return await self._get_and_lock(queue, q)
 
     async def get_for_queue_or_wait(self, queue: str) -> Account | None:
+        loop = asyncio.get_running_loop()
+        deadline = None if self._wait_timeout is None else loop.time() + self._wait_timeout
         msg_shown = False
         while True:
             account = await self.get_for_queue(queue)
-            if not account:
-                if self._raise_when_no_account or get_env_bool("TWS_RAISE_WHEN_NO_ACCOUNT"):
-                    raise NoAccountError(f"No account available for queue {queue}")
-
-                if not msg_shown:
-                    nat = await self.next_available_at(queue)
-                    if not nat:
-                        logger.warning("No active accounts. Stopping...")
-                        return None
-
-                    msg = f'No account available for queue "{queue}". Next available at {nat}'
-                    logger.info(msg)
-                    msg_shown = True
-
-                await asyncio.sleep(5)
-                continue
-            else:
+            if account is not None:
                 if msg_shown:
                     logger.info(f"Continuing with account {account.username} on queue {queue}")
+                return account
 
-            return account
+            raise_no_account = self._raise_when_no_account or get_env_bool(
+                "TWS_RAISE_WHEN_NO_ACCOUNT"
+            )
+            nat = await self.next_available_at(queue)
+            no_active = not nat
+            timed_out = deadline is not None and loop.time() >= deadline
+            give_up = no_active or self._wait_timeout is None or timed_out
+
+            if give_up:
+                if raise_no_account:
+                    raise NoAccountError(f"No account available for queue {queue}")
+                if no_active:
+                    logger.warning("No active accounts. Stopping...")
+                    return None
+                if self._wait_timeout is not None:
+                    return None
+
+            if not msg_shown:
+                logger.info(f'No account available for queue "{queue}". Next available at {nat}')
+                msg_shown = True
+
+            remaining = None if deadline is None else max(deadline - loop.time(), 0)
+            interval = (
+                self._wait_interval if remaining is None else min(self._wait_interval, remaining)
+            )
+            await asyncio.sleep(interval)
 
     async def next_available_at(self, queue: str):
         qs = f"""
@@ -399,7 +440,8 @@ class AccountsPool:
         for x in accounts:
             item: AccountInfo = {
                 "username": x.username,
-                "logged_in": (x.headers or {}).get("authorization", "") != "",
+                "logged_in": x.has_session,
+                "login_method": x.login_method,
                 "active": x.active,
                 "last_used": x.last_used,
                 "total_req": sum(x.stats.values()),

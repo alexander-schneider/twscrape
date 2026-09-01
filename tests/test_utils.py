@@ -48,6 +48,35 @@ def test_to_old_obj_user_handles_non_dict_nested_fields():
     assert doc["description"] == ""
 
 
+def test_to_old_obj_user_maps_current_profile_fields():
+    doc = to_old_obj(
+        {
+            "__typename": "User",
+            "rest_id": "12345",
+            "core": {"screen_name": "testuser", "name": "Test User"},
+            "avatar": {"image_url": "https://example.com/avatar.jpg"},
+            "banner": {"image_url": "https://example.com/banner.jpg"},
+            "profile_bio": {
+                "description": "A test bio",
+                "entities": {"description": {}, "url": {}},
+            },
+            "action_counts": {"favorites_count": 11},
+            "relationship_counts": {"followers": 12, "following": 13},
+            "tweet_counts": {"media_tweets": 14, "tweets": 15},
+            "pinned_items": {"tweet_ids_str": ["67890"]},
+        }
+    )
+
+    assert doc["profile_banner_url"] == "https://example.com/banner.jpg"
+    assert doc["entities"] == {"description": {}, "url": {}}
+    assert doc["favourites_count"] == 11
+    assert doc["followers_count"] == 12
+    assert doc["friends_count"] == 13
+    assert doc["media_count"] == 14
+    assert doc["statuses_count"] == 15
+    assert doc["pinned_tweet_ids_str"] == ["67890"]
+
+
 def test_to_old_obj_tweet_casts_fallback_id_str():
     doc = to_old_obj({"__typename": "Tweet", "legacy": None, "id_str": 456})
 

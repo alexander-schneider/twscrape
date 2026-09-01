@@ -298,6 +298,17 @@ async def resilient_search():
         return []
 ```
 
+### Account availability
+
+Bound how long requests wait when all matching accounts are locked or rate-limited:
+
+```py
+api = API(wait_timeout=30, wait_interval=1)
+```
+
+`wait_timeout=None` preserves the existing unbounded wait. A timeout of `0`
+returns immediately, or raises `NoAccountError` when `raise_when_no_account=True`.
+
 ### Stopping iteration with break
 
 In order to correctly release an account in case of `break` in a loop, a special syntax must be used. Otherwise, Python's event loop will release the lock on the account sometime in the future. See explanation [here](https://github.com/vladkens/twscrape/issues/27#issuecomment-1623395424).
@@ -324,6 +335,21 @@ twscrape search --help
 ```
 
 ### Add accounts
+
+To add a cookie-only account, or refresh an existing account session while
+preserving its credentials, proxy, statistics, and queue locks:
+
+```sh
+twscrape add_cookie user1
+```
+
+The command reads from a hidden interactive prompt, or from stdin when piped.
+The two required X session cookies must be present. Cookie values are deliberately
+not accepted as command-line arguments so they do not leak into shell history or
+the process list.
+
+The equivalent Python API is
+`await api.pool.add_account_cookies("user1", cookie_export)`.
 
 To add accounts use `add_accounts` command. Command syntax is:
 ```sh

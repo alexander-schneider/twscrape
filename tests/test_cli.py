@@ -1,3 +1,4 @@
+import io
 from types import SimpleNamespace
 
 import pytest
@@ -36,6 +37,9 @@ class FakePool:
 
     async def load_from_file(self, file_path, line_format):
         self.loaded = (file_path, line_format)
+
+    async def add_account_cookies(self, username, cookies):
+        self.added_cookie = (username, cookies)
 
     async def delete_accounts(self, usernames):
         self.deleted = usernames
@@ -147,6 +151,35 @@ async def test_main_add_accounts_prints_next_step(monkeypatch, capsys):
     pool = FakePool.instances[-1]
     assert pool.loaded == ("accounts.txt", "username:password:email:email_password")
     assert "twscrape login_accounts" in capsys.readouterr().out
+
+
+@pytest.mark.asyncio
+async def test_main_add_cookie_refreshes_account(monkeypatch):
+    monkeypatch.setattr(cli, "AccountsPool", FakePool)
+    monkeypatch.setattr(cli.sys, "stdin", io.StringIO("auth_token=token; ct0=csrf"))
+
+    args = SimpleNamespace(
+        command="add_cookie",
+        debug=False,
+        db="accounts.db",
+        username="user1",
+    )
+    await cli.main(args)
+
+    assert FakePool.instances[-1].added_cookie == (
+        "user1",
+        "auth_token=token; ct0=csrf",
+    )
+
+
+def test_parser_accepts_add_cookie_command():
+    args = cli.build_parser().parse_args(["add_cookie", "user1"])
+
+    assert args.command == "add_cookie"
+    assert args.username == "user1"
+
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(["add_cookie", "user1", "cookies-must-not-be-in-argv"])
 
 
 @pytest.mark.asyncio

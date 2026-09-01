@@ -2,9 +2,11 @@
 
 import argparse
 import asyncio
+import getpass
 import io
 import json
 import sqlite3
+import sys
 from collections.abc import Awaitable, Callable
 from importlib.metadata import version
 
@@ -73,6 +75,15 @@ async def _cmd_add_accounts(pool: AccountsPool, args: argparse.Namespace) -> Non
     print("\nNow run:\ntwscrape login_accounts")
 
 
+async def _cmd_add_cookie(pool: AccountsPool, args: argparse.Namespace) -> None:
+    cookies = (
+        getpass.getpass("cookies (e.g. auth_token=xxx; ct0=yyy): ")
+        if sys.stdin.isatty()
+        else sys.stdin.read().strip()
+    )
+    await pool.add_account_cookies(args.username, cookies)
+
+
 async def _cmd_delete_accounts(pool: AccountsPool, args: argparse.Namespace) -> None:
     await pool.delete_accounts(args.usernames)
 
@@ -101,6 +112,7 @@ POOL_COMMANDS: dict[str, PoolCommandHandler] = {
     "accounts": _cmd_accounts,
     "stats": _cmd_stats,
     "add_accounts": _cmd_add_accounts,
+    "add_cookie": _cmd_add_cookie,
     "del_accounts": _cmd_delete_accounts,
     "login_accounts": _cmd_login_accounts,
     "relogin_failed": _cmd_relogin_failed,
@@ -196,6 +208,11 @@ def build_parser() -> argparse.ArgumentParser:
     add_accounts = subparsers.add_parser("add_accounts", help="Add accounts")
     add_accounts.add_argument("file_path", help="File with accounts")
     add_accounts.add_argument("line_format", help="args of Pool.add_account splited by same delim")
+
+    add_cookie = subparsers.add_parser(
+        "add_cookie", help="Add or refresh one account from cookies"
+    )
+    add_cookie.add_argument("username", help="Local account identifier")
 
     del_accounts = subparsers.add_parser("del_accounts", help="Delete accounts")
     del_accounts.add_argument("usernames", nargs="+", default=[], help="Usernames to delete")

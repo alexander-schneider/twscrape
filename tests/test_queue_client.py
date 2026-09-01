@@ -1,9 +1,11 @@
+from collections import OrderedDict
 from contextlib import aclosing
 
 import httpx
 import pytest
 from pytest_httpx import HTTPXMock
 
+import twscrape.queue_client as queue_client_module
 from twscrape.accounts_pool import GLOBAL_LOCK_QUEUE, AccountsPool
 from twscrape.queue_client import (
     ApiFeatureUpdateRequiredError,
@@ -13,6 +15,7 @@ from twscrape.queue_client import (
     XClIdGenStore,
     is_transient_api_error,
 )
+from twscrape.utils import utc
 from twscrape.xclid import XClIdAccountError, XClIdParseError
 
 DB_FILE = "/tmp/twscrape_test_queue_client.db"
@@ -207,8 +210,17 @@ async def test_explicit_auth_error_deactivates_account(httpx_mock: HTTPXMock, cl
     assert user1.error_msg == "(32) Could not authenticate you"
 
 
-async def test_retry_with_same_acc_on_network_error(httpx_mock: HTTPXMock, client_fixture: CF):
+@pytest.mark.parametrize("error_type", [httpx.ReadTimeout, httpx.RemoteProtocolError])
+async def test_retry_with_same_acc_on_network_error(
+    httpx_mock: HTTPXMock, client_fixture: CF, monkeypatch, error_type
+):
     pool, client = client_fixture
+    sleeps = []
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr("twscrape.queue_client.asyncio.sleep", fake_sleep)
 
     # locked account on enter
     await client.__aenter__()
@@ -216,12 +228,13 @@ async def test_retry_with_same_acc_on_network_error(httpx_mock: HTTPXMock, clien
     assert len(locked1) == 1
 
     # timeout on first request, account should not be switched
-    httpx_mock.add_exception(httpx.ReadTimeout("Unable to read within timeout"))
+    httpx_mock.add_exception(error_type("Transient transport failure"))
     httpx_mock.add_response(url=URL, json={"foo": "2"}, status_code=200)
 
     rep = await client.get(URL)
     assert rep is not None
     assert rep.json() == {"foo": "2"}
+    assert sleeps == [2]
 
     locked2 = await get_locked(pool)
     assert locked2 == locked1
@@ -231,18 +244,32 @@ async def test_retry_with_same_acc_on_network_error(httpx_mock: HTTPXMock, clien
     assert username is not None
 
 
-async def test_transport_errors_raise_after_retry_limit(httpx_mock: HTTPXMock, client_fixture: CF):
+async def test_transport_errors_cool_and_rotate_after_retry_limit(
+    httpx_mock: HTTPXMock, client_fixture: CF, monkeypatch
+):
     pool, client = client_fixture
+    sleeps = []
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr("twscrape.queue_client.asyncio.sleep", fake_sleep)
 
     async with client:
         for _ in range(3):
             httpx_mock.add_exception(httpx.ReadTimeout("Unable to read within timeout"))
+        httpx_mock.add_response(url=URL, json={"ok": True})
 
-        with pytest.raises(httpx.ReadTimeout):
-            await client.get(URL)
+        rep = await client.get(URL)
 
-    locked = await get_locked(pool)
-    assert len(locked) == 0
+    assert rep is not None
+    assert rep.json() == {"ok": True}
+    assert getattr(rep, "__username", None) == "user2"
+    assert sleeps == [2, 4]
+
+    user1 = await pool.get("user1")
+    lock_seconds = (user1.locks["SearchTimeline"] - utc.now()).total_seconds()
+    assert 0 < lock_seconds <= 61
 
 
 async def test_feature_flag_mismatch_raises_typed_error(httpx_mock: HTTPXMock, client_fixture: CF):
@@ -266,10 +293,16 @@ async def test_feature_flag_mismatch_raises_typed_error(httpx_mock: HTTPXMock, c
     assert len(locked) == 0
 
 
-async def test_loadshed_globally_cools_account_and_switches_queue(
-    httpx_mock: HTTPXMock, client_fixture: CF
+async def test_loadshed_retries_with_same_account(
+    httpx_mock: HTTPXMock, client_fixture: CF, monkeypatch
 ):
     pool, client = client_fixture
+    sleeps = []
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr("twscrape.queue_client.asyncio.sleep", fake_sleep)
 
     await client.__aenter__()
     assert client.ctx is not None
@@ -285,7 +318,38 @@ async def test_loadshed_globally_cools_account_and_switches_queue(
     rep = await client.get(URL)
     assert rep is not None
     assert rep.json() == {"foo": "ok"}
+    assert getattr(rep, "__username", None) == "user1"
+    assert sleeps == [2]
+
+
+async def test_persistent_loadshed_globally_cools_account_and_switches_queue(
+    httpx_mock: HTTPXMock, client_fixture: CF, monkeypatch
+):
+    pool, client = client_fixture
+    sleeps = []
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr("twscrape.queue_client.asyncio.sleep", fake_sleep)
+
+    await client.__aenter__()
+    assert client.ctx is not None
+    assert client.ctx.acc.username == "user1"
+
+    for _ in range(3):
+        httpx_mock.add_response(
+            url=URL,
+            json={"errors": [{"code": -1, "message": "LoadShed: Unspecified"}]},
+            status_code=200,
+        )
+    httpx_mock.add_response(url=URL, json={"foo": "ok"}, status_code=200)
+
+    rep = await client.get(URL)
+    assert rep is not None
+    assert rep.json() == {"foo": "ok"}
     assert getattr(rep, "__username", None) == "user2"
+    assert sleeps == [2, 4]
 
     user1 = await pool.get("user1")
     assert "SearchTimeline" in user1.locks
@@ -294,6 +358,39 @@ async def test_loadshed_globally_cools_account_and_switches_queue(
     async with QueueClient(pool, "TweetDetail") as tweet_detail_client:
         assert tweet_detail_client.ctx is not None
         assert tweet_detail_client.ctx.acc.username == "user2"
+
+
+async def test_api_errors_with_data_are_returned_and_throttled(
+    httpx_mock: HTTPXMock, client_fixture: CF, monkeypatch
+):
+    _pool, client = client_fixture
+    logs = []
+    monkeypatch.setattr(queue_client_module.LogOnce, "pending", OrderedDict())
+    monkeypatch.setattr(
+        queue_client_module.logger, "log", lambda level, message: logs.append((level, message))
+    )
+
+    errors = [
+        {"code": -1, "message": "Dependency: Unspecified"},
+        {"code": -1, "message": "LoadShed: Unspecified"},
+    ]
+    for response_errors in (errors, list(reversed(errors))):
+        httpx_mock.add_response(
+            url=URL,
+            json={
+                "data": {"search_by_raw_query": {"items": [1]}},
+                "errors": response_errors,
+            },
+        )
+
+        rep = await client.get(URL)
+        assert rep is not None
+        assert rep.json()["data"]["search_by_raw_query"]["items"] == [1]
+
+    assert len(logs) == 1
+    assert logs[0][0] == "DEBUG"
+    assert "SearchTimeline" in logs[0][1]
+    assert "user1" not in logs[0][1]
 
 
 async def test_unknown_api_errors_fail_closed_and_cool_account(
@@ -324,6 +421,36 @@ async def test_unknown_api_errors_fail_closed_and_cool_account(
     assert rep is not None
     assert rep.json() == {"foo": "ok"}
     assert getattr(rep, "__username", None) == "user2"
+
+
+@pytest.mark.parametrize("data", [None, {"user": {}}])
+@pytest.mark.parametrize(
+    "errors",
+    [
+        [{"code": 999}],
+        [{"code": -1, "message": "LoadShed: Unspecified"}, {"code": 999}],
+    ],
+)
+async def test_malformed_api_errors_fail_closed(
+    httpx_mock: HTTPXMock, client_fixture: CF, data, errors
+):
+    pool, client = client_fixture
+
+    await client.__aenter__()
+    assert client.ctx is not None
+    assert client.ctx.acc.username == "user1"
+
+    payload = {"errors": errors}
+    if data is not None:
+        payload["data"] = data
+    httpx_mock.add_response(url=URL, json=payload, status_code=200)
+
+    with pytest.raises(UnexpectedApiError, match="Malformed X API errors payload"):
+        await client.get(URL)
+
+    assert client.ctx is None
+    user1 = await pool.get("user1")
+    assert "SearchTimeline" in user1.locks
 
 
 async def test_service_unavailable_raises_typed_error_without_cooling_account_after_retries(

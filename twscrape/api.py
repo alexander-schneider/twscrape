@@ -10,21 +10,21 @@ from .queue_client import QueueClient
 from .utils import encode_params, find_obj, get_by_path
 
 # OP_{NAME} – {NAME} should be same as second part of GQL ID (required to auto-update script)
-OP_SearchTimeline = "hz_94eVAtrtQo_vO3my7Rw/SearchTimeline"
-OP_UserByRestId = "DaeC_2LfMgwCujE03HSZtw/UserByRestId"
-OP_UserByScreenName = "2qvSHpkWTMS9i0zJAwDNiA/UserByScreenName"
-OP_TweetDetail = "rZA6K31W4E90vZKBmxXV3g/TweetDetail"
-OP_Followers = "18SNsfvwgu2CYIweeUVHAw/Followers"
-OP_Following = "PEIBUtChvR2i_NZCxbK3fA/Following"
-OP_Retweeters = "eio_KeZrPr83caqxWGNtiw/Retweeters"
-OP_UserTweets = "6r5OLCC_wFH4CpRyXKuAmQ/UserTweets"
-OP_UserTweetsAndReplies = "klja8a2iJX_3to5RdfVlgw/UserTweetsAndReplies"
-OP_ListLatestTweetsTimeline = "LV64djPRhnsVhGCK76s13w/ListLatestTweetsTimeline"
-OP_BlueVerifiedFollowers = "94iKIFXsW369GcGrPaEBcA/BlueVerifiedFollowers"
-OP_UserCreatorSubscriptions = "qhT9BsaNXNYh4R-e1REj7Q/UserCreatorSubscriptions"
-OP_UserMedia = "IS3w9vvPg1SJysLErvnFGg/UserMedia"
-OP_Bookmarks = "LoLaMO4GuHLEPJOhH9kjAw/Bookmarks"
-OP_GenericTimelineById = "GswYtMwzaFKSDx_SvC-f6g/GenericTimelineById"
+OP_SearchTimeline = "hyPfJYJ_XAtDYoslQc-Rgg/SearchTimeline"
+OP_UserByRestId = "xvmVfRLmnr1alc5f2dib0Q/UserByRestId"
+OP_UserByScreenName = "Gb-d6r0vxPOADdG62OEBpQ/UserByScreenName"
+OP_TweetDetail = "XMOz5h24KAZ86qKffKTLdQ/TweetDetail"
+OP_Followers = "JNyQdTISpzCkj_1fqxDvFg/Followers"
+OP_Following = "qGZZDF3mp91q7X22s3HxpA/Following"
+OP_Retweeters = "ROjiuYueotTnWoI8m2YaiQ/Retweeters"
+OP_UserTweets = "SXVCYB8XHSS25nzIljNtZA/UserTweets"
+OP_UserTweetsAndReplies = "qUpkZU6eN8MbtQb7rC_pYg/UserTweetsAndReplies"
+OP_ListLatestTweetsTimeline = "1LE3u14FJjPZUHKFGzos2g/ListLatestTweetsTimeline"
+OP_BlueVerifiedFollowers = "u3PkPbg--arppBcwNbF1ig/BlueVerifiedFollowers"
+OP_UserCreatorSubscriptions = "Qxe_gd-ZvdofnzSL8Ngzpw/UserCreatorSubscriptions"
+OP_UserMedia = "VyudDWQnr9vJNw7GasFz2g/UserMedia"
+OP_Bookmarks = "iblrFnKr6PZUR-dWpfXG6g/Bookmarks"
+OP_GenericTimelineById = "ee4dBLWL8a8qg6n19m1htQ/GenericTimelineById"
 
 GQL_URL = "https://x.com/i/api/graphql"
 PUBLIC_GQL_URL = "https://api.x.com/graphql"
@@ -81,13 +81,24 @@ class API:
         debug=False,
         proxy: str | None = None,
         raise_when_no_account=False,
+        wait_timeout: float | None = None,
+        wait_interval: float = 5.0,
     ):
         if isinstance(pool, AccountsPool):
             self.pool = pool
         elif isinstance(pool, str):
-            self.pool = AccountsPool(db_file=pool, raise_when_no_account=raise_when_no_account)
+            self.pool = AccountsPool(
+                db_file=pool,
+                raise_when_no_account=raise_when_no_account,
+                wait_timeout=wait_timeout,
+                wait_interval=wait_interval,
+            )
         else:
-            self.pool = AccountsPool(raise_when_no_account=raise_when_no_account)
+            self.pool = AccountsPool(
+                raise_when_no_account=raise_when_no_account,
+                wait_timeout=wait_timeout,
+                wait_interval=wait_interval,
+            )
 
         self.proxy = proxy
         self.debug = debug
@@ -107,9 +118,9 @@ class API:
         return rep if is_res else None, new_total, is_cur and not is_lim
 
     def _get_cursor(self, obj: dict, cursor_type="Bottom") -> str | None:
-        if cur := find_obj(obj, lambda x: x.get("cursorType") == cursor_type):
-            return cur.get("value")
-        return None
+        cur = find_obj(obj, lambda x: x.get("cursorType") == cursor_type)
+        value = cur.get("value") if cur else None
+        return value if isinstance(value, str) else None
 
     def _get_entries(self, obj: dict) -> list[dict]:
         entries = get_by_path(obj, "entries") or get_by_path(obj, "items_results") or []
@@ -122,26 +133,29 @@ class API:
             )
         ]
 
-    def _is_stalled_search_page(
+    def _is_stalled_page(
         self,
+        queue: str,
         cursor: str | None,
         entries: list[dict],
         seen_cursors: set[str],
         seen_pages: set[tuple[str, ...]],
-    ) -> bool:
-        if cursor is not None and cursor in seen_cursors:
-            return True
+    ) -> tuple[bool, bool]:
+        page_key: tuple[str, ...] = ()
+        if queue == "SearchTimeline":
+            page_key = tuple(
+                str(x.get("entryId")) for x in entries if x.get("entryId") is not None
+            )
 
-        page_key = tuple(str(x.get("entryId")) for x in entries if x.get("entryId") is not None)
-        if page_key and page_key in seen_pages:
-            return True
+        repeated_cursor = cursor is not None and cursor in seen_cursors
+        repeated_page = bool(page_key and page_key in seen_pages)
 
         if cursor is not None:
             seen_cursors.add(cursor)
         if page_key:
             seen_pages.add(page_key)
 
-        return False
+        return repeated_cursor, repeated_page
 
     async def _iter_unique(self, gen, parser, limit=-1):
         ids = set()
@@ -188,15 +202,19 @@ class API:
                 obj = rep.json()
                 els = self._get_entries(obj)
                 cur = self._get_cursor(obj, cursor_type)
+                repeated_cursor, repeated_page = self._is_stalled_page(
+                    queue, cur, els, seen_cursors, seen_pages
+                )
 
-                if queue == "SearchTimeline" and self._is_stalled_search_page(
-                    cur, els, seen_cursors, seen_pages
-                ):
-                    logger.warning("SearchTimeline pagination stalled, stopping repeated page")
+                if repeated_page:
+                    logger.warning(f"{queue} pagination stalled, stopping")
                     return
 
                 rep, cnt, active = self._is_end(rep, queue, els, cur, cnt, limit)
                 if rep is None:
+                    if repeated_cursor:
+                        logger.warning(f"{queue} pagination stalled, stopping")
+                        return
                     # Cursor exists, so data may follow after an empty or fully filtered page.
                     if cur is not None:
                         empty_pages += 1
@@ -208,6 +226,9 @@ class API:
 
                 empty_pages = 0
                 yield rep
+                if repeated_cursor:
+                    logger.warning(f"{queue} pagination stalled, stopping")
+                    return
 
     async def _gql_item(
         self,

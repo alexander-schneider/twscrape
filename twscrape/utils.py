@@ -180,6 +180,10 @@ def _flatten_user_v2(obj: dict) -> dict:
             if avatar_url:
                 flat["profile_image_url_https"] = avatar_url
 
+    banner = obj.get("banner")
+    if isinstance(banner, dict) and banner.get("image_url") is not None:
+        flat["profile_banner_url"] = banner["image_url"]
+
     if not flat.get("location"):
         location_obj = obj.get("location")
         if isinstance(location_obj, dict):
@@ -209,10 +213,35 @@ def _flatten_user_v2(obj: dict) -> dict:
     if "is_blue_verified" not in flat and "is_blue_verified" in obj:
         flat["is_blue_verified"] = obj["is_blue_verified"]
 
+    profile_bio = flat["profile_bio"]
     if not flat.get("description"):
-        description = flat["profile_bio"].get("description")
+        description = profile_bio.get("description")
         if description is not None:
             flat["description"] = description
+    if isinstance(profile_bio.get("entities"), dict):
+        flat["entities"] = profile_bio["entities"]
+
+    action_counts = obj.get("action_counts")
+    if isinstance(action_counts, dict) and action_counts.get("favorites_count") is not None:
+        flat["favourites_count"] = action_counts["favorites_count"]
+
+    relationship_counts = obj.get("relationship_counts")
+    if isinstance(relationship_counts, dict):
+        if relationship_counts.get("followers") is not None:
+            flat["followers_count"] = relationship_counts["followers"]
+        if relationship_counts.get("following") is not None:
+            flat["friends_count"] = relationship_counts["following"]
+
+    tweet_counts = obj.get("tweet_counts")
+    if isinstance(tweet_counts, dict):
+        if tweet_counts.get("tweets") is not None:
+            flat["statuses_count"] = tweet_counts["tweets"]
+        if tweet_counts.get("media_tweets") is not None:
+            flat["media_count"] = tweet_counts["media_tweets"]
+
+    pinned_items = obj.get("pinned_items")
+    if isinstance(pinned_items, dict) and isinstance(pinned_items.get("tweet_ids_str"), list):
+        flat["pinned_tweet_ids_str"] = pinned_items["tweet_ids_str"]
 
     flat.setdefault("description", "")
     flat.setdefault("location", "")
@@ -278,10 +307,10 @@ def to_old_rep(obj: dict) -> dict[str, Any]:
 
     users = {}
     for x in tmp.get("User", []):
-        if "legacy" not in x or not (x.get("rest_id") or x.get("id_str")):
+        if not (x.get("rest_id") or x.get("id_str")):
             continue
         user = to_old_obj(x)
-        if user.get("id_str"):
+        if user.get("id_str") and user.get("screen_name"):
             users[str(user["id_str"])] = user
 
     trends = [x for x in tmp.get("TimelineTrend", [])]
