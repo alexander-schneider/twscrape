@@ -298,6 +298,13 @@ class QueueClient:
         log_msg = f"{rep.status_code:3d} - {req_id(rep)} - {err_msg}"
         logger.trace(log_msg)
 
+        if malformed_errors:
+            logger.error(f"API malformed errors payload: {log_msg}")
+            await self._close_ctx(utc.ts() + UNKNOWN_API_ERROR_COOLDOWN_SECONDS)
+            raise UnexpectedApiError(
+                f"Malformed X API errors payload ({rep.status_code}) for {self.queue}"
+            )
+
         # for dev: need to add some features in api.py
         if has_error(errors, "(336) The following features cannot be null"):
             raise ApiFeatureUpdateRequiredError(
@@ -362,7 +369,7 @@ class QueueClient:
             return
 
         if err_msg != "OK":
-            if has_data(rep, res) and not malformed_errors:
+            if has_data(rep, res):
                 LogOnce.throttled(
                     log_key,
                     "DEBUG",

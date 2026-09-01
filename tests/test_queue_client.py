@@ -424,19 +424,28 @@ async def test_unknown_api_errors_fail_closed_and_cool_account(
 
 
 @pytest.mark.parametrize("data", [None, {"user": {}}])
-async def test_malformed_api_errors_fail_closed(httpx_mock: HTTPXMock, client_fixture: CF, data):
+@pytest.mark.parametrize(
+    "errors",
+    [
+        [{"code": 999}],
+        [{"code": -1, "message": "LoadShed: Unspecified"}, {"code": 999}],
+    ],
+)
+async def test_malformed_api_errors_fail_closed(
+    httpx_mock: HTTPXMock, client_fixture: CF, data, errors
+):
     pool, client = client_fixture
 
     await client.__aenter__()
     assert client.ctx is not None
     assert client.ctx.acc.username == "user1"
 
-    payload = {"errors": [{"code": 999}]}
+    payload = {"errors": errors}
     if data is not None:
         payload["data"] = data
     httpx_mock.add_response(url=URL, json=payload, status_code=200)
 
-    with pytest.raises(UnexpectedApiError, match="Malformed API errors payload"):
+    with pytest.raises(UnexpectedApiError, match="Malformed X API errors payload"):
         await client.get(URL)
 
     assert client.ctx is None
