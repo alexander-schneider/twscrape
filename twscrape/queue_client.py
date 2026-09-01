@@ -458,12 +458,7 @@ class QueueClient:
                 logger.error(f"{e}; username={ctx.acc.username}; queue={self.queue}")
                 await self._close_ctx()
                 return None
-            except (
-                httpx.ReadTimeout,
-                httpx.ProxyError,
-                httpx.ConnectError,
-                httpx.ConnectTimeout,
-            ) as e:
+            except httpx.TransportError as e:
                 if await ctx.retry("transport", TRANSPORT_ERROR_RETRY_LIMIT):
                     continue
 

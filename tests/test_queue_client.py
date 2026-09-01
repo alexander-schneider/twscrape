@@ -210,8 +210,9 @@ async def test_explicit_auth_error_deactivates_account(httpx_mock: HTTPXMock, cl
     assert user1.error_msg == "(32) Could not authenticate you"
 
 
+@pytest.mark.parametrize("error_type", [httpx.ReadTimeout, httpx.RemoteProtocolError])
 async def test_retry_with_same_acc_on_network_error(
-    httpx_mock: HTTPXMock, client_fixture: CF, monkeypatch
+    httpx_mock: HTTPXMock, client_fixture: CF, monkeypatch, error_type
 ):
     pool, client = client_fixture
     sleeps = []
@@ -227,7 +228,7 @@ async def test_retry_with_same_acc_on_network_error(
     assert len(locked1) == 1
 
     # timeout on first request, account should not be switched
-    httpx_mock.add_exception(httpx.ReadTimeout("Unable to read within timeout"))
+    httpx_mock.add_exception(error_type("Transient transport failure"))
     httpx_mock.add_response(url=URL, json={"foo": "2"}, status_code=200)
 
     rep = await client.get(URL)
