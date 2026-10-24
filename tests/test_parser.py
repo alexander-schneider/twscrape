@@ -4,6 +4,7 @@ from copy import deepcopy
 from typing import Callable
 
 import pytest
+from httpx import Response
 
 import twscrape.models as models_module
 from twscrape import API, gather
@@ -19,6 +20,7 @@ from twscrape.models import (
     UserRef,
     parse_tweet,
     parse_tweets,
+    parse_user,
     parse_users,
 )
 
@@ -945,3 +947,257 @@ def test_parse_tweets_falls_back_to_embedded_author_when_users_map_is_missing(mo
     doc = docs[0]
     assert doc.user.id_str == user_id
     assert doc.user.username == "PengellySt72806"
+
+
+def author_tweet(tweet_id: str, user_id: str | None = "42", author=None):
+    obj = {
+        "__typename": "Tweet",
+        "rest_id": tweet_id,
+        "legacy": {
+            "id_str": tweet_id,
+            "user_id_str": user_id,
+            "created_at": "Wed Jan 01 12:00:00 +0000 2025",
+            "full_text": f"Tweet {tweet_id}",
+            "entities": {},
+        },
+    }
+    if author is not None:
+        obj["core"] = {"user_results": {"result": author}}
+    return obj
+
+
+@pytest.mark.parametrize("partial_first", [False, True])
+def test_complete_profile_survives_partial_copy(partial_first):
+    full = {
+        "__typename": "User",
+        "rest_id": "42",
+        "core": {"screen_name": "known", "name": "Known User"},
+        "relationship_counts": {"followers": 17},
+    }
+    partial = {"__typename": "User", "rest_id": "42", "core": {"screen_name": "known"}}
+    copies = [partial, full] if partial_first else [full, partial]
+
+    users = list(parse_users({"data": {"users": copies}}))
+
+    assert len(users) == 1
+    assert (users[0].id, users[0].username, users[0].displayname, users[0].followersCount) == (
+        42,
+        "known",
+        "Known User",
+        17,
+    )
+
+
+@pytest.mark.parametrize(
+    "author,handle",
+    [
+        (None, ""),
+        ({"__typename": "UserUnavailable"}, ""),
+        ({"__typename": "User", "rest_id": "42"}, ""),
+        ({"__typename": "User", "rest_id": "42", "core": {}}, ""),
+        ({"__typename": "User", "rest_id": "42", "core": {"screen_name": "known"}}, "known"),
+    ],
+)
+def test_tweet_without_author_profile_keeps_real_identity(author, handle):
+    docs = list(parse_tweets({"data": {"tweet": author_tweet("100", author=author)}}))
+
+    assert len(docs) == 1
+    assert (docs[0].id, docs[0].rawContent, docs[0].user.id, docs[0].user.username) == (
+        100,
+        "Tweet 100",
+        42,
+        handle,
+    )
+    assert docs[0].url == f"https://x.com/{handle or 'i'}/status/100"
+    assert docs[0].user.url == f"https://x.com/{handle or 'i/user/42'}"
+
+
+def test_missing_author_id_does_not_invent_a_profile(tmp_path, monkeypatch):
+    monkeypatch.setattr(models_module, "PARSE_ERROR_DUMP_DIR", str(tmp_path))
+    raw = {"data": {"tweet": author_tweet("100", user_id=None)}}
+
+    assert list(parse_tweets(raw)) == []
+    assert list(parse_users(raw)) == []
+    assert (
+        parse_user(
+            Response(200, json={"data": {"user": {"result": {"__typename": "UserUnavailable"}}}})
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize("quote_link_matches", [False, True])
+@pytest.mark.parametrize("partial_mention", [False, True])
+def test_nested_author_hints_stay_linked_to_the_right_tweet(quote_link_matches, partial_mention):
+    quote = author_tweet("300", user_id="43")
+    retweet = author_tweet("200")
+    retweet["legacy"]["quoted_status_id_str"] = "300"
+    retweet["legacy"]["quoted_status_permalink"] = {
+        "expanded": f"https://x.com/quote_author/status/{'300' if quote_link_matches else '301'}"
+    }
+    retweet["quoted_status_result"] = {"result": quote}
+    outer = author_tweet(
+        "100",
+        user_id="1",
+        author={
+            "__typename": "User",
+            "rest_id": "1",
+            "core": {"screen_name": "outer", "name": "Outer"},
+        },
+    )
+    outer["legacy"].update(
+        {
+            "retweeted_status_id_str": "200",
+            "full_text": "RT @retweet_author: Tweet 200",
+            "entities": {"user_mentions": [{"id_str": "999", "screen_name": "unrelated"}]},
+        }
+    )
+    outer["retweeted_status_result"] = {"result": retweet}
+    if partial_mention:
+        outer["legacy"]["entities"]["user_mentions"] = [{"id_str": "42", "name": "Retweet Name"}]
+
+    docs = {doc.id: doc for doc in parse_tweets({"data": {"tweet": outer}})}
+
+    assert 100 in docs
+    nested = docs[100].retweetedTweet
+    assert nested is not None
+    assert (nested.id, nested.rawContent, nested.user.id, nested.user.username) == (
+        200,
+        "Tweet 200",
+        42,
+        "retweet_author",
+    )
+    assert nested.user.displayname == ("Retweet Name" if partial_mention else "")
+    quoted = nested.quotedTweet
+    assert quoted is not None
+    assert (quoted.id, quoted.rawContent, quoted.user.id, quoted.user.username) == (
+        300,
+        "Tweet 300",
+        43,
+        "quote_author" if quote_link_matches else "",
+    )
+    assert [(user.id, user.username) for user in parse_users({"data": {"tweet": outer}})] == [
+        (1, "outer")
+    ]
+
+
+def test_nested_partial_author_keeps_handle_and_enriches_missing_name():
+    partial = {
+        "__typename": "User",
+        "rest_id": "42",
+        "core": {"screen_name": "known_child"},
+    }
+    child = author_tweet("200", author=partial)
+    outer = author_tweet(
+        "100",
+        user_id="1",
+        author={
+            "__typename": "User",
+            "rest_id": "1",
+            "core": {"screen_name": "outer", "name": "Outer"},
+        },
+    )
+    outer["legacy"]["retweeted_status_id_str"] = "200"
+    outer["legacy"]["entities"] = {
+        "user_mentions": [{"id_str": "42", "screen_name": "old_child", "name": "Child Name"}]
+    }
+    outer["retweeted_status_result"] = {"result": child}
+
+    docs = {doc.id: doc for doc in parse_tweets({"data": {"tweet": outer}})}
+
+    child_doc = docs[100].retweetedTweet
+    assert child_doc is not None
+    assert (child_doc.user.id, child_doc.user.username, child_doc.user.displayname) == (
+        42,
+        "known_child",
+        "Child Name",
+    )
+
+
+@pytest.mark.parametrize("permalink", [None, {"expanded": None}])
+def test_optional_quote_permalink_does_not_drop_complete_authors(permalink):
+    child = author_tweet(
+        "200",
+        author={
+            "__typename": "User",
+            "rest_id": "42",
+            "core": {"screen_name": "known", "name": "Known"},
+        },
+    )
+    outer = author_tweet(
+        "100",
+        user_id="1",
+        author={
+            "__typename": "User",
+            "rest_id": "1",
+            "core": {"screen_name": "outer", "name": "Outer"},
+        },
+    )
+    outer["legacy"].update({"quoted_status_id_str": "200", "quoted_status_permalink": permalink})
+    outer["quoted_status_result"] = {"result": child}
+
+    docs = {doc.id: doc for doc in parse_tweets({"data": {"tweet": outer}})}
+
+    assert 100 in docs
+    quote = docs[100].quotedTweet
+    assert quote is not None
+    assert (quote.id, quote.user.username) == (200, "known")
+
+
+@pytest.mark.parametrize("with_mention", [False, True])
+def test_reply_reference_keeps_known_identity_and_uses_linked_metadata(with_mention):
+    reply = author_tweet(
+        "100",
+        user_id="1",
+        author={
+            "__typename": "User",
+            "rest_id": "1",
+            "core": {"screen_name": "outer", "name": "Outer"},
+        },
+    )
+    reply["legacy"].update(
+        {"in_reply_to_user_id_str": "42", "in_reply_to_screen_name": "known_reply"}
+    )
+    if with_mention:
+        reply["legacy"]["entities"] = {
+            "user_mentions": [{"id_str": "42", "screen_name": "old_reply", "name": "Reply Name"}]
+        }
+    raw = {
+        "data": {
+            "tweet": reply,
+            "user": {
+                "__typename": "User",
+                "rest_id": "42",
+                "core": {"screen_name": "known_reply"},
+            },
+        }
+    }
+    if not with_mention:
+        del raw["data"]["user"]
+
+    docs = list(parse_tweets(raw))
+
+    assert len(docs) == 1
+    reference = docs[0].inReplyToUser
+    assert reference is not None
+    assert (reference.id, reference.username, reference.displayname) == (
+        42,
+        "known_reply",
+        "Reply Name" if with_mention else "",
+    )
+
+
+def test_real_tweet_dates_still_trigger_parse_drift(tmp_path, monkeypatch):
+    monkeypatch.setattr(models_module, "PARSE_ERROR_DUMP_DIR", str(tmp_path))
+    author = {
+        "__typename": "User",
+        "rest_id": "42",
+        "core": {"screen_name": "known", "name": "Known"},
+    }
+    tweets = [author_tweet(str(index), author=author) for index in range(1, 12)]
+    for obj in tweets[:10]:
+        obj["legacy"]["created_at"] = "invalid date"
+
+    with pytest.raises(ParseDriftError, match="10 item failures") as exc_info:
+        list(parse_tweets({"data": {"tweets": tweets}}))
+    assert isinstance(exc_info.value.__cause__, ValueError)

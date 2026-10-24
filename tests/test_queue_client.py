@@ -638,3 +638,48 @@ async def test_ctx_closed_on_break(httpx_mock: HTTPXMock, client_fixture: CF):
 
     # ctx should be None after break
     assert client.ctx is None
+
+
+@pytest.mark.parametrize("empty", [None, {}, []])
+async def test_deadline_with_empty_data_retries_same_account(
+    empty, httpx_mock: HTTPXMock, client_fixture: CF, monkeypatch
+):
+    pool, client = client_fixture
+    monkeypatch.setattr("twscrape.queue_client.asyncio.sleep", _mock_sleep)
+    httpx_mock.add_response(
+        url=URL,
+        json={
+            "errors": [{"code": -1, "message": "DeadlineExceeded: Unspecified"}],
+            "data": {"user": empty},
+        },
+    )
+    httpx_mock.add_response(url=URL, json={"data": {"user": {"id": "42"}}})
+
+    async with client:
+        rep = await client.get(URL)
+
+    assert rep is not None
+    assert rep.json() == {"data": {"user": {"id": "42"}}}
+    assert getattr(rep, "__username") == "user1"
+    assert len(httpx_mock.get_requests()) == 2
+    assert (await pool.get("user1")).active is True
+    assert (await pool.get("user1")).locks == {}
+
+
+@pytest.mark.parametrize("data", [0, False, {"items": []}])
+async def test_deadline_preserves_nonempty_direct_data(
+    data, httpx_mock: HTTPXMock, client_fixture: CF
+):
+    _pool, client = client_fixture
+    payload = {
+        "errors": [{"code": -1, "message": "DeadlineExceeded: Unspecified"}],
+        "data": {"value": data},
+    }
+    httpx_mock.add_response(url=URL, json=payload)
+
+    async with client:
+        rep = await client.get(URL)
+
+    assert rep is not None
+    assert rep.json() == payload
+    assert len(httpx_mock.get_requests()) == 1
