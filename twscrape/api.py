@@ -159,8 +159,10 @@ class API:
 
     async def _iter_unique(self, gen, parser, limit=-1):
         ids = set()
+        stalled_pages = 0
         async with aclosing(gen) as items:
             async for rep in items:
+                before = len(ids)
                 for item in parser(rep.json(), -1):
                     if item.id in ids:
                         continue
@@ -170,6 +172,11 @@ class API:
 
                     if limit > 0 and len(ids) >= limit:
                         return
+
+                stalled_pages = stalled_pages + 1 if len(ids) == before else 0
+                if stalled_pages >= 3:
+                    logger.debug("Stopping after 3 pages without new parsed items")
+                    return
 
     # gql helpers
 
@@ -259,16 +266,12 @@ class API:
                 yield x
 
     async def search(self, q: str, limit=-1, kv: KV = None):
-        async for x in self._iter_unique(
-            self.search_raw(q, limit=limit, kv=kv), parse_tweets, limit
-        ):
+        async for x in self._iter_unique(self.search_raw(q, kv=kv), parse_tweets, limit):
             yield x
 
     async def search_user(self, q: str, limit=-1, kv: KV = None):
         kv = {"product": "People", **(kv or {})}
-        async for x in self._iter_unique(
-            self.search_raw(q, limit=limit, kv=kv), parse_users, limit
-        ):
+        async for x in self._iter_unique(self.search_raw(q, kv=kv), parse_users, limit):
             yield x
 
     # user_by_id
