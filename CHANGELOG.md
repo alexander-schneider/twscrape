@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Preserve complete user profiles when X repeats them as partial copies.
+- Keep tweets with missing author profiles, including retweets and quotes,
+  without discarding known handles or reply references. Use valid ID-based URLs
+  when a handle is unavailable.
+- Count unique parsed results for search limits and stop after three consecutive
+  pages without new parsed results.
+- Retry transient GraphQL errors whose direct data fields are empty.
+
+### Maintenance
+
+- Shorten the fork README and move local development, live checks and release
+  instructions into a separate guide.
+- Correct account, proxy and limit examples and ignore generated development
+  files.
+
 ## v0.20.1 - 2026-09-01
 
 ### Added

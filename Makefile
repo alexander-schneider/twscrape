@@ -11,7 +11,7 @@ check:
 	@make test-live
 
 install:
-	pip install -e .[dev]
+	$(PYTHON) -m pip install -e ".[dev]"
 	$(PYTHON) -m build
 
 build:
