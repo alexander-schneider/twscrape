@@ -743,7 +743,12 @@ def _get_tweet_user_obj(tw_obj: dict, res: dict, fallback: dict | None = None) -
             candidate = get_or(tw_obj, path)
             if not isinstance(candidate, dict) or candidate.get("__typename") == "UserUnavailable":
                 continue
-            candidate_id = candidate.get("rest_id") or candidate.get("id_str") or user_id
+            candidate_id = (
+                candidate.get("rest_id")
+                or candidate.get("id_str")
+                or candidate.get("id")
+                or user_id
+            )
             if candidate_id is None or (user_id is not None and str(candidate_id) != str(user_id)):
                 continue
             user = to_old_obj({**candidate, "__typename": "User", "rest_id": candidate_id})
