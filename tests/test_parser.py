@@ -1012,6 +1012,27 @@ def test_tweet_without_author_profile_keeps_real_identity(author, handle):
     assert docs[0].user.url == f"https://x.com/{handle or 'i/user/42'}"
 
 
+@pytest.mark.parametrize(
+    "tweet_user_id,expected_id,expected_handle,expected_name",
+    [
+        (None, 42, "known", "Known User"),
+        ("42", 42, "known", "Known User"),
+        ("43", 43, "", ""),
+    ],
+)
+def test_flat_author_numeric_id_preserves_identity(
+    tweet_user_id, expected_id, expected_handle, expected_name
+):
+    author = {"id": 42, "screen_name": "known", "name": "Known User"}
+    raw = {"data": {"tweet": author_tweet("100", user_id=tweet_user_id, author=author)}}
+
+    docs = list(parse_tweets(raw))
+
+    assert [(doc.id, doc.user.id, doc.user.username, doc.user.displayname) for doc in docs] == [
+        (100, expected_id, expected_handle, expected_name)
+    ]
+
+
 def test_missing_author_id_does_not_invent_a_profile(tmp_path, monkeypatch):
     monkeypatch.setattr(models_module, "PARSE_ERROR_DUMP_DIR", str(tmp_path))
     raw = {"data": {"tweet": author_tweet("100", user_id=None)}}
