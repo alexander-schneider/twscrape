@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.21.0 - 2026-10-25
 
 ### Fixed
 
@@ -18,6 +18,10 @@
   instructions into a separate guide.
 - Correct account, proxy and limit examples and ignore generated development
   files.
+
+Changes: [PR #18](https://github.com/alexander-schneider/twscrape/pull/18).
+Author-profile fixes adapt upstream [#344](https://github.com/vladkens/twscrape/pull/344)
+and [#345](https://github.com/vladkens/twscrape/pull/345).
 
 ## v0.20.1 - 2026-09-01
 
