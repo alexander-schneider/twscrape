@@ -5,6 +5,12 @@
 This repository is the standalone home of the `twscrape` dependency used by `api.adanos.org`.
 It started from `vladkens/twscrape`, but fixes should now land here first. Treat this repo as the source of truth. Preserve upstream attribution and historical issue links.
 
+This repository is public. Tests simulate clients through public library interfaces
+using synthetic data. Keep external applications' implementation, schemas,
+configuration and business rules out of source, fixtures, PRs, logs and artifacts.
+Do not require private application checkouts or private-source credentials.
+Changes or PRs in external application repositories need an explicit request.
+
 ## Quick Start
 
 ```bash
