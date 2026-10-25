@@ -35,6 +35,64 @@ offline. Preserve public async methods, model fields, HTTPX raw response types,
 global search de-duplication, account cooldowns and the SQLite compatibility
 fallback. See [AGENTS.md](../AGENTS.md) for the repository map and change rules.
 
+## Adanos compatibility checks
+
+The normal offline suite includes end-to-end API pipeline tests. They replace
+external HTTP responses and signing assets while running the real client,
+account pool, SQLite updates and parsers. Run only this group with:
+
+```sh
+make test-e2e
+```
+
+To exercise the actual private Adanos wrappers, supply a local consumer checkout
+and install its lightweight configuration dependency:
+
+```sh
+python -m pip install pydantic-settings
+ADANOS_SOURCE_ROOT=/path/to/api.adanos.org make test-adanos
+```
+
+This target requires the real source. It checks imports, account and proxy
+behavior, UTC search filtering, normalization, pagination, direct replies,
+budgets, retries, partial results and logging. It does not start PostgreSQL,
+inference or a complete worker. The private consumer workflow runs this same
+target against public twscrape main and records both source commits and Adanos'
+declared dependency pin. Testing main does not update that pin or Production.
+
+Public PRs run without private source or live credentials. Their JUnit reports
+contain only offline test data. The private wrapper tests run in the private
+repository. Keep those results separate from the live library check.
+
+### Current X acceptance in Actions
+
+The [Live X compatibility workflow](../.github/workflows/live-x.yml) runs daily
+and through manual dispatch on reviewed `main`. Its `x-live` GitHub environment
+must allow only the `main` branch and contain these secrets:
+
+- `TWS_LIVE_USERNAME` identifies a dedicated test account.
+- `TWS_LIVE_COOKIES` contains nonempty `auth_token` and `ct0` cookies.
+- `TWS_LIVE_PROXY` is the required proxy URL.
+
+The workflow uses real signing and requires both positive search results and
+a direct reply. It bounds requests and runtime, serializes the test account,
+and fails when configuration is missing or positive data cannot be established.
+It performs no password login or session refresh.
+
+Only the sanitized JSON report is uploaded. Account databases, raw logs,
+response bodies and parser dumps remain excluded. An empty result, HTTP 200,
+skipped job or offline replay does not establish current X acceptance.
+
+Run the same bounded probe locally with test credentials in the environment:
+
+```sh
+python scripts/check_adanos_live.py --report /tmp/twscrape-live.json
+```
+
+`ADANOS_SOURCE_ROOT` optionally enables actual-wrapper execution locally.
+Set `TWS_REQUIRE_ADANOS=1` to require that mode. The public workflow has no
+private checkout, so its report always identifies library-only live evidence.
+
 ## Live checks
 
 These commands contact X and require your authorized account. They are separate
@@ -46,6 +104,7 @@ test. Do not run it in an offline debugging loop.
 Seed a local session once with hidden cookie prompts:
 
 ```sh
+export TWS_LIVE_PROXY="http://proxy.example:8080"
 make test-live-seed-prompt
 make test-live
 ```
@@ -61,11 +120,15 @@ Override the path for the Make targets with `LIVE_DB`:
 make test-live LIVE_DB=/path/to/test-accounts.db
 ```
 
-The live test uses a recent cashtag search for `NVDA`, with a 24-hour window and
-`min_faves:2`. `TWS_LIVE_TICKER`, `TWS_LIVE_LIMIT` and `TWS_LIVE_QUERY` customize
-the probe. The test also accepts `TWS_USERNAME` and `TWS_COOKIES` when a stored
-session is unavailable. Prefer the hidden prompt setup to entering cookies in
-shell history.
+The live test searches `NVDA` within the current UTC day, then requires a direct
+reply from a searched parent. `TWS_LIVE_PROXY` is required even when the saved
+database contains account proxies. To use another ticker, run the CLI probe
+with `--ticker SYMBOL`.
+
+`TWS_LIVE_USERNAME` and `TWS_LIVE_COOKIES` provide a disposable cookie-session
+database instead of the saved test database. Otherwise the probe uses a
+read-only SQLite backup and preserves existing cooldowns. Prefer the hidden
+prompt setup to entering cookies in shell history.
 
 ### Manual smoke test
 

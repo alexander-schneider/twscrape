@@ -1,0 +1,64 @@
+name: Live X compatibility
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 5 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: live-x-compatibility
+  cancel-in-progress: false
+
+jobs:
+  live:
+    if: github.repository == 'alexander-schneider/twscrape' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    environment: x-live
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install library
+        run: python -m pip install -e .
+      - name: Check real signing, search and direct replies
+        env:
+          TWS_LIVE_USERNAME: ${{ secrets.TWS_LIVE_USERNAME }}
+          TWS_LIVE_COOKIES: ${{ secrets.TWS_LIVE_COOKIES }}
+          TWS_LIVE_PROXY: ${{ secrets.TWS_LIVE_PROXY }}
+          TWS_REQUIRE_LIVE: "1"
+          DO_NOT_TRACK: "1"
+          TWS_TELEMETRY: "0"
+        run: |
+          mkdir -p reports
+          if python scripts/check_adanos_live.py --report reports/live.json > "$RUNNER_TEMP/live-x-output.log" 2>&1; then
+            echo "Live X compatibility passed."
+          else
+            echo "::error::Live X compatibility failed. See the sanitized report."
+            exit 1
+          fi
+      - name: Show sanitized result
+        if: always()
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          report = json.loads(Path("reports/live.json").read_text())
+          allowed = {"mode", "status", "category", "error_class", "candidate_sha", "candidate_import", "consumer_sha", "consumer_imports", "counts"}
+          assert set(report) <= allowed, "Unexpected live report fields"
+          print(json.dumps(report, indent=2))
+          PY
+      - name: Upload sanitized live result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-x-compatibility
+          path: reports/live.json
+          if-no-files-found: error
+          retention-days: 7
