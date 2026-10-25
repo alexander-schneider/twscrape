@@ -13,7 +13,7 @@ and pull requests in this repository.
 Python 3.10 or newer is required. Install the released fork from Git:
 
 ```sh
-python -m pip install "twscrape @ git+https://github.com/alexander-schneider/twscrape.git@v0.20.1"
+python -m pip install "twscrape @ git+https://github.com/alexander-schneider/twscrape.git@v0.21.0"
 ```
 
 `pip install twscrape` installs the upstream PyPI package. To develop this fork,
