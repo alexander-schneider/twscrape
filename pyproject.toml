@@ -58,7 +58,10 @@ pythonpath = ["."]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "session"
 filterwarnings = ["ignore::DeprecationWarning"]
-markers = ["live: requires a real X account, cookies, and network access"]
+markers = [
+  "live: requires a real X account, cookies, and network access",
+  "adanos: executes the real private Adanos consumer checkout",
+]
 
 [tool.ruff]
 line-length = 99

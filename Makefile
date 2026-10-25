@@ -24,7 +24,13 @@ lint:
 	@$(PYTHON) -m pyright .
 
 test:
-	@$(PYTHON) -m pytest -s --cov=twscrape -m "not live" tests/
+	@$(PYTHON) -m pytest -s --cov=twscrape -m "not live and not adanos" tests/
+
+test-e2e:
+	@$(PYTHON) -m pytest -q tests/e2e/
+
+test-adanos:
+	@TWS_REQUIRE_ADANOS=1 $(PYTHON) -m pytest -q -m adanos tests/adanos/
 
 test-live:
 	@TWS_REQUIRE_LIVE=1 TWS_LIVE_DB="$(LIVE_DB)" $(PYTHON) -m pytest -s -m live tests/
