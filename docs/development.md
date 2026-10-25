@@ -35,6 +35,49 @@ offline. Preserve public async methods, model fields, HTTPX raw response types,
 global search de-duplication, account cooldowns and the SQLite compatibility
 fallback. See [AGENTS.md](../AGENTS.md) for the repository map and change rules.
 
+## Public API pipeline tests
+
+```sh
+make test-e2e
+```
+
+These tests simulate a client using public library interfaces. They create a
+temporary cookie account, inspect the pool, search multiple pages and read
+direct replies. The actual API, HTTP client, QueueClient, SQLite updates and
+parsers execute against synthetic external responses.
+
+The tests cover public model fields, deduplication, pagination, account recovery,
+transient errors, error propagation and generator cleanup. They need no external
+application checkout or credentials. The normal offline suite includes them.
+GitHub Actions runs that suite on Python 3.10 through 3.13 and retains JUnit
+results.
+
+## Live API compatibility in Actions
+
+The [live workflow](../.github/workflows/live-x.yml) runs daily and by manual
+dispatch on trusted `main`. Configure the `x-live` environment to allow only
+`main`, with these secrets:
+
+- `TWS_LIVE_USERNAME` identifies a dedicated test account.
+- `TWS_LIVE_COOKIES` contains nonempty `auth_token` and `ct0` cookies.
+- `TWS_LIVE_PROXY` contains the required proxy URL.
+
+The probe uses real signing and requires positive search data and at least one
+direct reply. Missing configuration, empty probes and request failures return
+a nonzero exit code. Requests and runtime are bounded, and runs sharing the
+test account are serialized. Only sanitized JSON status and counts are uploaded.
+Raw responses, logs, parser dumps and account databases are excluded.
+
+Run the same probe locally:
+
+```sh
+python scripts/check_live.py --report /tmp/twscrape-live.json
+python scripts/check_live.py --query 'hello lang:en min_replies:1' --report /tmp/twscrape-live.json
+```
+
+This is a public-library compatibility check. It does not import an external
+application or validate its business rules.
+
 ## Live checks
 
 These commands contact X and require your authorized account. They are separate
@@ -46,6 +89,7 @@ test. Do not run it in an offline debugging loop.
 Seed a local session once with hidden cookie prompts:
 
 ```sh
+export TWS_LIVE_PROXY="http://proxy.example:8080"
 make test-live-seed-prompt
 make test-live
 ```
@@ -61,11 +105,14 @@ Override the path for the Make targets with `LIVE_DB`:
 make test-live LIVE_DB=/path/to/test-accounts.db
 ```
 
-The live test uses a recent cashtag search for `NVDA`, with a 24-hour window and
-`min_faves:2`. `TWS_LIVE_TICKER`, `TWS_LIVE_LIMIT` and `TWS_LIVE_QUERY` customize
-the probe. The test also accepts `TWS_USERNAME` and `TWS_COOKIES` when a stored
-session is unavailable. Prefer the hidden prompt setup to entering cookies in
-shell history.
+The live test uses a neutral search query and then fetches direct replies from
+a searched parent. `TWS_LIVE_PROXY` is required even when the stored account
+has a proxy. Use the CLI probe's `--query` option to select another query.
+
+`TWS_LIVE_USERNAME` and `TWS_LIVE_COOKIES` provide a disposable cookie-session
+database instead of the saved test database. Otherwise the probe uses a
+read-only SQLite backup and preserves existing cooldowns. Prefer the hidden
+prompt setup to entering cookies in shell history.
 
 ### Manual smoke test
 
