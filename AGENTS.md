@@ -3,12 +3,12 @@
 ## Purpose
 
 This repository is the standalone home of the `twscrape` dependency used by `api.adanos.org`.
-It started from `vladkens/twscrape`, but fixes should now land here first. Treat this repo as the source of truth, even if some metadata and documentation still point to the old upstream.
+It started from `vladkens/twscrape`, but fixes should now land here first. Treat this repo as the source of truth. Preserve upstream attribution and historical issue links.
 
 ## Quick Start
 
 ```bash
-pip install -e .[dev]
+python -m pip install -e ".[dev]"
 make lint
 make test
 ```
@@ -19,13 +19,13 @@ Useful targeted commands:
 python -m pytest tests/test_api.py -q
 python -m pytest tests/test_parser.py -q
 python -m pytest tests/test_pool.py tests/test_queue_client.py -q
-make check
 ```
 
 Notes:
 
 - `make lint` runs import sorting, formatting, Ruff, and Pyright.
 - `make test` is fully mocked and should stay fast and deterministic.
+- `make check` also runs the live X test. Use `make lint` and `make test` for offline verification. See [the development guide](docs/development.md) for live checks and their test databases.
 - `make update-mocks` is a live-network maintenance task. It requires working X accounts, a usable `twscrape` CLI setup, and `jq`. Do not use it in normal CI/debug loops.
 
 ## Repo Shape
@@ -70,7 +70,7 @@ Do not rename public methods, model fields, or CLI commands casually.
 - GraphQL operation changed or new feature toggle became required:
   Update `twscrape/api.py`.
 - Search pagination stalls or repeated pages:
-  Inspect `API._gql_items`, `API._is_stalled_search_page`, and `API._iter_unique`.
+  Inspect `API._gql_items`, `API._is_stalled_page`, and `API._iter_unique`.
 - Rate-limit, 403, 404, or account switching bugs:
   Inspect `twscrape/queue_client.py` first, then the relevant pool methods in `twscrape/accounts_pool.py`.
 - Locking or account availability bugs:
@@ -105,7 +105,7 @@ Additional guidance:
 ## Release and Metadata Notes
 
 - `origin` already points to `alexander-schneider/twscrape`.
-- `pyproject.toml` and parts of `readme.md` still reference the old upstream repository. Verify whether a future fix should also update docs/metadata.
+- Package URLs point to this fork. Keep the original authors credited and historical upstream references intact.
 - CI lives in `.github/workflows/ci.yml` and currently tests Python 3.10 through 3.13.
 
 ## Practical Defaults For Future Agents

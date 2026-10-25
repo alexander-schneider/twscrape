@@ -10,7 +10,7 @@ maintainers = [{ name = "Alexander Schneider" }]
 description = "Twitter GraphQL and Search API implementation with SNScrape data models"
 readme = "readme.md"
 requires-python = ">=3.10"
-keywords = ["twitter", "scrape", "scrapper", "api", "snscrape"]
+keywords = ["twitter", "scrape", "scraper", "api", "snscrape"]
 license = { text = "MIT" }
 classifiers = [
   'Development Status :: 4 - Beta',
@@ -46,9 +46,6 @@ repository = "https://github.com/alexander-schneider/twscrape"
 
 [project.scripts]
 twscrape = "twscrape.cli:run"
-
-[tool.setuptools]
-packages = ['twscrape']
 
 [tool.hatch.build.targets.wheel]
 packages = ["twscrape"]

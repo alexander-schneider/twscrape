@@ -311,7 +311,9 @@ def to_old_rep(obj: dict) -> dict[str, Any]:
             continue
         user = to_old_obj(x)
         if user.get("id_str") and user.get("screen_name"):
-            users[str(user["id_str"])] = user
+            user_id = str(user["id_str"])
+            if user_id not in users or "name" in user:
+                users[user_id] = user
 
     trends = [x for x in tmp.get("TimelineTrend", [])]
     trends = {x["name"]: x for x in trends}

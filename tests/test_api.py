@@ -109,7 +109,6 @@ async def test_gql_params(api_mock: API, monkeypatch):
             pass
 
         assert len(args) == 1, f"{func} not called once"
-        assert args[0][1]["limit"] == 100, f"limit not changed in {func}"
         assert args[0][0][1]["count"] == 100, f"count not changed in {func}"
 
 
@@ -361,3 +360,114 @@ async def test_user_by_id_uses_public_gql_host(api_mock: API, monkeypatch):
     assert args[1]["userId"] == "2244994945"
     assert args[1]["withSafetyModeUserFields"] is True
     assert kwargs["gql_url"] == api_module.PUBLIC_GQL_URL
+
+
+def parsed_search_page(ids: list[int], cursor: str | None, people=False):
+    page = make_search_page([f"result-{item_id}" for item_id in ids], cursor)
+    entries = page["data"]["search_by_raw_query"]["search_timeline"]["timeline"]["instructions"][
+        0
+    ]["entries"]
+    for entry, item_id in zip(entries, ids):
+        user = {
+            "__typename": "User",
+            "rest_id": str(item_id),
+            "core": {"screen_name": f"user{item_id}", "name": f"User {item_id}"},
+        }
+        entry["content"]["result"] = (
+            user
+            if people
+            else {
+                "__typename": "Tweet",
+                "rest_id": str(item_id),
+                "legacy": {
+                    "id_str": str(item_id),
+                    "user_id_str": str(item_id),
+                    "created_at": "Wed Jan 01 12:00:00 +0000 2025",
+                    "full_text": f"Tweet {item_id}",
+                },
+                "core": {"user_results": {"result": user}},
+            }
+        )
+    return page
+
+
+def mock_search_pages(monkeypatch, pages):
+    calls = []
+
+    class FakeQueueClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def post(self, url, json):
+            calls.append(json)
+            assert pages, "unexpected extra pagination request"
+            return DummyResponse(pages.pop(0))
+
+    monkeypatch.setattr(api_module, "QueueClient", FakeQueueClient)
+    return calls
+
+
+@pytest.mark.parametrize("method", ["search", "search_user"])
+async def test_parsed_search_limit_counts_unique_models(api_mock, monkeypatch, method):
+    pages = [
+        parsed_search_page([1, 2], "a", method == "search_user"),
+        parsed_search_page([2], "b", method == "search_user"),
+        parsed_search_page([3, 4], None, method == "search_user"),
+    ]
+    calls = mock_search_pages(monkeypatch, pages)
+
+    items = await gather(getattr(api_mock, method)("query", limit=3))
+
+    assert [item.id for item in items] == [1, 2, 3]
+    assert len(calls) == 3
+    assert calls[0]["variables"]["product"] == ("People" if method == "search_user" else "Latest")
+
+
+@pytest.mark.parametrize("method", ["search", "search_user"])
+async def test_parsed_search_stops_after_three_pages_without_models(api_mock, monkeypatch, method):
+    calls = mock_search_pages(
+        monkeypatch,
+        [make_search_page([f"ignored-{index}"], str(index)) for index in range(3)],
+    )
+
+    items = await gather(getattr(api_mock, method)("query", limit=10))
+
+    assert items == []
+    assert len(calls) == 3
+
+
+@pytest.mark.parametrize("method", ["search", "search_user"])
+async def test_parsed_search_resets_no_progress_count(api_mock, monkeypatch, method):
+    pages = [
+        make_search_page(["ignored-1"], "a"),
+        make_search_page(["ignored-2"], "b"),
+        parsed_search_page([1], "c", method == "search_user"),
+        make_search_page(["ignored-3"], "d"),
+        make_search_page(["ignored-4"], "e"),
+        parsed_search_page([2], None, method == "search_user"),
+    ]
+    calls = mock_search_pages(monkeypatch, pages)
+
+    items = await gather(getattr(api_mock, method)("query", limit=2))
+
+    assert [item.id for item in items] == [1, 2]
+    assert len(calls) == 6
+
+
+async def test_raw_search_keeps_page_based_limit(api_mock, monkeypatch):
+    calls = mock_search_pages(
+        monkeypatch,
+        [parsed_search_page([1, 2], "a"), parsed_search_page([3], None)],
+    )
+
+    pages = await gather(api_mock.search_raw("query", limit=1))
+
+    assert len(pages) == 1
+    assert [tweet.id for tweet in api_module.parse_tweets(pages[0].json())] == [1, 2]
+    assert len(calls) == 1

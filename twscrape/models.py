@@ -19,6 +19,11 @@ from .utils import find_item, get_or, int_or, to_old_obj, to_old_rep, utc
 PARSE_ERROR_DUMP_DIR = os.path.join(tempfile.gettempdir(), "twscrape")
 PARSE_ERROR_DUMP_LIMIT = 5
 PARSE_ERROR_LIMIT_PER_RESPONSE = 10
+_RT_ID_PATH = [
+    "retweeted_status_id_str",
+    "retweeted_status_result.result.rest_id",
+    "retweeted_status_result.result.tweet.rest_id",
+]
 
 
 class ParseDriftError(Exception):
@@ -214,7 +219,7 @@ class User(JSONTrait):
         return User(
             id=int(id_str),
             id_str=id_str,
-            url=f"https://x.com/{username}",
+            url=f"https://x.com/{username or 'i/user/' + id_str}",
             username=username,
             displayname=displayname,
             rawDescription=description,
@@ -283,14 +288,8 @@ class Tweet(JSONTrait):
     # vibe: Optional["Vibe"] = None
 
     @staticmethod
-    def parse(obj: dict, res: dict):
-        tw_usr = User.parse(_get_tweet_user_obj(obj, res))
-
-        rt_id_path = [
-            "retweeted_status_id_str",
-            "retweeted_status_result.result.rest_id",
-            "retweeted_status_result.result.tweet.rest_id",
-        ]
+    def parse(obj: dict, res: dict, author: dict | None = None):
+        tw_usr = User.parse(_get_tweet_user_obj(obj, res, author))
 
         qt_id_path = [
             "quoted_status_id_str",
@@ -298,10 +297,10 @@ class Tweet(JSONTrait):
             "quoted_status_result.result.tweet.rest_id",
         ]
 
-        rt_obj = get_or(res, f"tweets.{_first(obj, rt_id_path)}")
+        rt_obj = get_or(res, f"tweets.{_first(obj, _RT_ID_PATH)}")
         qt_obj = get_or(res, f"tweets.{_first(obj, qt_id_path)}")
 
-        url = f"https://x.com/{tw_usr.username}/status/{obj['id_str']}"
+        url = f"https://x.com/{tw_usr.username or 'i'}/status/{obj['id_str']}"
         doc = Tweet(
             id=int(obj["id_str"]),
             id_str=obj["id_str"],
@@ -324,8 +323,12 @@ class Tweet(JSONTrait):
                 obj, ["entities.urls", "note_tweet.note_tweet_results.result.entity_set.urls"]
             ),
             viewCount=_get_views(obj, rt_obj or {}),
-            retweetedTweet=Tweet.parse(rt_obj, res) if rt_obj else None,
-            quotedTweet=Tweet.parse(qt_obj, res) if qt_obj else None,
+            retweetedTweet=Tweet.parse(rt_obj, res, _referenced_author(obj, rt_obj))
+            if rt_obj
+            else None,
+            quotedTweet=Tweet.parse(qt_obj, res, _referenced_author(obj, qt_obj))
+            if qt_obj
+            else None,
             place=Place.parse(obj["place"]) if obj.get("place") else None,
             coordinates=Coordinates.parse(obj),
             inReplyToTweetId=int_or(obj, "in_reply_to_status_id_str"),
@@ -715,38 +718,81 @@ def _get_reply_user(tw_obj: dict, res: dict):
     if user_id is None:
         return None
 
-    if user_id in res["users"]:
-        return UserRef.parse(res["users"][user_id])
-
+    user = dict(res["users"].get(user_id, {}))
     mentions = get_or(tw_obj, "entities.user_mentions", [])
-    mention = find_item(mentions, lambda x: x["id_str"] == tw_obj["in_reply_to_user_id_str"])
+    mention = find_item(mentions, lambda x: x.get("id_str") == user_id)
     if mention:
-        return UserRef.parse(mention)
+        user = {**mention, **user}
+        for key in ("screen_name", "name"):
+            user[key] = user.get(key) or mention.get(key, "")
 
-    # todo: user not found in reply (probably deleted or hidden)
+    if not user.get("screen_name") and tw_obj.get("in_reply_to_screen_name"):
+        user = {**user, "id_str": user_id, "screen_name": tw_obj["in_reply_to_screen_name"]}
+
+    if user:
+        return UserRef.parse(user)
+
     return None
 
 
-def _get_tweet_user_obj(tw_obj: dict, res: dict) -> dict:
+def _get_tweet_user_obj(tw_obj: dict, res: dict, fallback: dict | None = None) -> dict:
     user_id = tw_obj.get("user_id_str", None)
-    users = res.get("users", {})
-    if user_id is not None and user_id in users:
-        return users[user_id]
+    user = res.get("users", {}).get(user_id)
+    if user is None:
+        for path in ("core.user_results.result", "author_results.result"):
+            candidate = get_or(tw_obj, path)
+            if not isinstance(candidate, dict) or candidate.get("__typename") == "UserUnavailable":
+                continue
+            candidate_id = (
+                candidate.get("rest_id")
+                or candidate.get("id_str")
+                or candidate.get("id")
+                or user_id
+            )
+            if candidate_id is None or (user_id is not None and str(candidate_id) != str(user_id)):
+                continue
+            user = to_old_obj({**candidate, "__typename": "User", "rest_id": candidate_id})
+            break
 
-    for path in (
-        "core.user_results.result",
-        "author_results.result",
-    ):
-        user_obj = get_or(tw_obj, path)
-        if not isinstance(user_obj, dict):
-            continue
-        if user_obj.get("__typename") == "UserUnavailable":
-            continue
-        if "legacy" in user_obj and "rest_id" in user_obj:
-            return to_old_obj(user_obj)
-        return user_obj
+    if user is None and user_id is not None:
+        user = {"id_str": user_id}
+    if user is None:
+        raise KeyError(f"user {user_id} not found in response payload")
 
-    raise KeyError(f"user {user_id} not found in response payload")
+    if fallback is not None and str(fallback.get("id_str")) == str(user.get("id_str")):
+        user = dict(user)
+        for key in ("screen_name", "name"):
+            if not user.get(key) and fallback.get(key):
+                user[key] = fallback[key]
+    return user
+
+
+def _referenced_author(parent: dict, nested: dict) -> dict | None:
+    user_id = nested.get("user_id_str")
+    if user_id is None:
+        return None
+
+    mention = find_item(
+        get_or(parent, "entities.user_mentions", []), lambda x: x.get("id_str") == user_id
+    )
+    author = {**(mention or {}), "id_str": user_id}
+
+    if not author.get("screen_name") and _first(parent, _RT_ID_PATH) == nested.get("id_str"):
+        match = re.match(r"RT @(\w+): ", parent.get("full_text", ""))
+        if match:
+            author["screen_name"] = match.group(1)
+
+    if not author.get("screen_name"):
+        permalink = parent.get("quoted_status_permalink")
+        link = permalink.get("expanded") if isinstance(permalink, dict) else None
+        match = (
+            re.fullmatch(r"https?://(?:twitter|x)\.com/(\w+)/status/(\d+)(?:[?#].*)?", link)
+            if isinstance(link, str)
+            else None
+        )
+        if match and match.group(2) == nested.get("id_str"):
+            author["screen_name"] = match.group(1)
+    return author
 
 
 def _get_source_url(tw_obj: dict):
