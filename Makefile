@@ -26,6 +26,9 @@ lint:
 test:
 	@$(PYTHON) -m pytest -s --cov=twscrape -m "not live" tests/
 
+test-e2e:
+	@$(PYTHON) -m pytest -q tests/e2e/
+
 test-live:
 	@TWS_REQUIRE_LIVE=1 TWS_LIVE_DB="$(LIVE_DB)" $(PYTHON) -m pytest -s -m live tests/
 

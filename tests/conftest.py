@@ -14,7 +14,10 @@ class ClIdGenMock:
 
 
 @pytest.fixture(autouse=True)
-def mock_xclidgenstore(monkeypatch):
+def mock_xclidgenstore(monkeypatch, request):
+    if request.node.get_closest_marker("live"):
+        return
+
     async def mock_get(*args, **kwargs):
         return ClIdGenMock()
 
