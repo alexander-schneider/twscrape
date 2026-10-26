@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import sqlite3
@@ -148,21 +149,36 @@ async def test_request_budget_stops_actual_http_before_budget_is_exceeded(probe_
     assert report["counts"]["http_requests"] == 2
 
 
-@pytest.mark.parametrize("timeout_name", ["OPERATION_TIMEOUT", "OVERALL_TIMEOUT"])
-async def test_deadline_cancels_real_http_pipeline(probe_wire, monkeypatch, timeout_name):
-    monkeypatch.setattr(live, timeout_name, 0.03)
+async def test_operation_deadline_cancels_real_http_pipeline(probe_wire, monkeypatch):
+    monkeypatch.setattr(live, "OPERATION_TIMEOUT", 1)
     probe_wire.enqueue(page(tweet(401)))
     original = live.httpx.AsyncHTTPTransport.handle_async_request
 
     async def delayed(transport, request):
-        response = await original(transport, request)
-        await probe_wire.real_sleep(0.1)
-        return response
+        await original(transport, request)
+        await asyncio.Future()
 
     monkeypatch.setattr(live.httpx.AsyncHTTPTransport, "handle_async_request", delayed)
     report = await live.run(ENV)
     assert report["status"] == "fail" and report["category"] == "timeout"
     assert report["counts"]["http_requests"] == 1
+
+
+async def test_overall_deadline_cancels_account_setup_before_http(probe_wire, monkeypatch):
+    monkeypatch.setattr(live, "OVERALL_TIMEOUT", 0.03)
+    cancelled = asyncio.Event()
+
+    async def blocked_setup(*args, **kwargs):
+        try:
+            await asyncio.Future()
+        finally:
+            cancelled.set()
+
+    monkeypatch.setattr(live.AccountsPool, "add_account", blocked_setup)
+    report = await live.run(ENV)
+    assert report["status"] == "fail" and report["category"] == "timeout"
+    assert report["counts"]["http_requests"] == 0
+    assert cancelled.is_set()
 
 
 @pytest.mark.parametrize("case,category", [("parse", "parse_drift"), ("http", "http_response")])
