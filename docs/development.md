@@ -54,9 +54,10 @@ results.
 
 ## Live API compatibility in Actions
 
-The [live workflow](../.github/workflows/live-x.yml) runs daily and by manual
-dispatch on trusted `main`. Configure the `x-live` environment to allow only
-`main`, with these secrets:
+The [live workflow](../.github/workflows/live-x.yml) runs every Monday at
+05:17 UTC and by manual dispatch on trusted `main`. In Europe/Berlin, this is
+06:17 in winter and 07:17 in summer. Configure the `x-live` environment to allow
+only `main`, with these secrets:
 
 - `TWS_LIVE_USERNAME` identifies a dedicated test account.
 - `TWS_LIVE_COOKIES` contains nonempty `auth_token` and `ct0` cookies.
