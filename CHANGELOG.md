@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.21.1 - 2026-10-28
+
+### Fixed
+
+- Propagate aborted requests and transaction-ID parsing failures through raw and
+  parsed API methods instead of returning empty results. Export `AbortReqError`
+  and `XClIdParseError`, and exit the CLI with code 1 on these failures while
+  preserving earlier output. Selectively adapts request failure propagation from
+  upstream [#347](https://github.com/vladkens/twscrape/pull/347).
+
 ## v0.21.0 - 2026-10-25
 
 ### Fixed

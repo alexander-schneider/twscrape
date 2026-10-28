@@ -137,6 +137,13 @@ The fork exposes `ServiceUnavailableError` for known temporary X failures,
 their retry and partial-result policy. The library preserves its own bounded
 request retries and account rotation.
 
+`AbortReqError` and `XClIdParseError` are also exported from `twscrape`. Requests
+raise these errors when aborted or when transaction-ID parsing fails, instead of
+returning an empty result. Both raw and parsed methods propagate the original
+error. Paginated methods keep earlier yields and raise on the failed page.
+The CLI exits with code 1, retaining any results already printed. Genuine empty
+responses and not-found lookups still return no items or `None`.
+
 ### Close an interrupted generator
 
 Use `aclosing` when breaking out early so the account lock is released promptly:

@@ -6,6 +6,7 @@ from http.cookies import SimpleCookie
 import httpx
 import pytest
 
+from twscrape.account import Account
 from twscrape.queue_client import XClIdGenStore
 
 DATE = "Sat Oct 24 12:00:00 +0000 2026"
@@ -98,7 +99,14 @@ class PipelineReplay:
         self.requests = []
         self.signatures = []
         self.sleeps = []
+        self.clients = []
         self.real_sleep = asyncio.sleep
+        make_client = Account.make_client
+
+        def tracked_client(account, proxy=None):
+            client = make_client(account, proxy=proxy)
+            self.clients.append(client)
+            return client
 
         async def shortened_sleep(delay, *args, **kwargs):
             self.sleeps.append(delay)
@@ -151,6 +159,7 @@ class PipelineReplay:
             return Signer()
 
         monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", http_transport)
+        monkeypatch.setattr(Account, "make_client", tracked_client)
         monkeypatch.setattr(XClIdGenStore, "get", classmethod(signer))
         monkeypatch.setattr(asyncio, "sleep", shortened_sleep)
 
@@ -159,3 +168,4 @@ class PipelineReplay:
 
     def close(self):
         assert not self.responses, "Scripted HTTP responses were not exercised"
+        assert all(client.is_closed for client in self.clients), "HTTP client was not closed"

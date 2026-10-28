@@ -154,7 +154,8 @@ async def test_xclid_parse_error_aborts_without_changing_account_state(
 
     monkeypatch.setattr(XClIdGenStore, "get", classmethod(fake_get))
 
-    assert await client.get(URL) is None
+    with pytest.raises(XClIdParseError, match="Signing script not found"):
+        await client.get(URL)
     user1 = await pool.get("user1")
     assert user1.active is True
     assert "SearchTimeline" not in user1.locks
