@@ -18,8 +18,9 @@ from .db import get_sqlite_version
 from .logger import logger, set_log_level
 from .login import LoginConfig
 from .models import Tweet, User
-from .queue_client import ApiFeatureUpdateRequiredError, UnexpectedApiError
+from .queue_client import AbortReqError, ApiFeatureUpdateRequiredError, UnexpectedApiError
 from .utils import print_table
+from .xclid import XClIdParseError
 
 PoolCommandHandler = Callable[[AccountsPool, argparse.Namespace], Awaitable[None]]
 ARG_NAMES = ("query", "tweet_id", "user_id", "username", "list_id", "trend_id")
@@ -258,10 +259,12 @@ def run():
 
     try:
         asyncio.run(main(args))
-    except ApiFeatureUpdateRequiredError as e:
-        logger.error(str(e))
-        raise SystemExit(1)
-    except UnexpectedApiError as e:
+    except (
+        AbortReqError,
+        ApiFeatureUpdateRequiredError,
+        UnexpectedApiError,
+        XClIdParseError,
+    ) as e:
         logger.error(str(e))
         raise SystemExit(1)
     except KeyboardInterrupt:

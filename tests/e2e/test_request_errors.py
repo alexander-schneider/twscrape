@@ -7,8 +7,8 @@ import pytest
 
 import twscrape.cli as cli
 from tests.http_replay import error_body, page, tweet
-from twscrape.queue_client import AbortReqError, XClIdGenStore
-from twscrape.xclid import XClIdParseError
+from twscrape import AbortReqError, XClIdParseError
+from twscrape.queue_client import XClIdGenStore
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
@@ -80,9 +80,9 @@ async def test_page_abort_reaches_reader_after_yielded_results(
     assert [item["total_req"] for item in await api.pool.accounts_info()] == [1]
 
 
-def fail_signing(monkeypatch):
+def fail_signing(monkeypatch, error_type=XClIdParseError):
     cause = ValueError("Unrecognized synthetic signing bundle")
-    error = XClIdParseError("Signing script not found")
+    error = error_type("Signing script not found")
 
     async def signing_failure(*args, **kwargs):
         raise error from cause
@@ -92,8 +92,9 @@ def fail_signing(monkeypatch):
 
 
 @pytest.mark.parametrize("after_page", [False, True])
+@pytest.mark.parametrize("error_type", [XClIdParseError, asyncio.CancelledError])
 async def test_signing_failure_preserves_cause_and_account_after_partial_replies(
-    pipeline, monkeypatch, after_page
+    pipeline, monkeypatch, after_page, error_type
 ):
     wire, api = pipeline
     async with aclosing(api.tweet_replies(900)) as replies:
@@ -103,9 +104,9 @@ async def test_signing_failure_preserves_cause_and_account_after_partial_replies
                 operation="TweetDetail",
             )
             assert (await anext(replies)).id == 901
-        error, cause = fail_signing(monkeypatch)
+        error, cause = fail_signing(monkeypatch, error_type)
 
-        with pytest.raises(XClIdParseError) as caught:
+        with pytest.raises(error_type) as caught:
             await anext(replies)
 
     assert caught.value is error

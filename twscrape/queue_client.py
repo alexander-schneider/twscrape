@@ -356,8 +356,8 @@ class QueueClient:
             # looks like when data exists, we can ignore this error
             # https://github.com/vladkens/twscrape/issues/166
             if not has_data(rep, res):
-                logger.warning(f"Dependency error (request skipped): {err_msg}")
-                raise AbortReqError()
+                logger.warning(f"Dependency error (request aborted): {err_msg}")
+                raise AbortReqError(f"X API dependency error for {self.queue}: {err_msg}")
 
         # content not found
         if rep.status_code == 200 and "_Missing: No status found with that ID" in err_msg:
@@ -448,8 +448,7 @@ class QueueClient:
                 unknown_retry, transient_api_retry = 0, 0
                 return rep
             except AbortReqError:
-                # abort all queries
-                return
+                raise
             except ApiFeatureUpdateRequiredError:
                 raise
             except ServiceUnavailableError as e:
@@ -472,7 +471,7 @@ class QueueClient:
             except XClIdParseError as e:
                 logger.error(f"{e}; username={ctx.acc.username}; queue={self.queue}")
                 await self._close_ctx()
-                return None
+                raise
             except httpx.TransportError as e:
                 if await ctx.retry("transport", TRANSPORT_ERROR_RETRY_LIMIT):
                     continue
