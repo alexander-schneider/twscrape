@@ -1,5 +1,7 @@
 import asyncio
+import socket
 
+import pytest
 import pytest_asyncio
 
 from tests.http_replay import PipelineReplay
@@ -8,6 +10,12 @@ from twscrape import API
 
 @pytest_asyncio.fixture(loop_scope="session")
 async def pipeline(monkeypatch, tmp_path):
+    def block_network(*args, **kwargs):
+        pytest.fail("External network is disabled in pipeline tests")
+
+    monkeypatch.setattr(socket, "getaddrinfo", block_network)
+    monkeypatch.setattr(socket.socket, "connect", block_network)
+    monkeypatch.setattr(socket.socket, "connect_ex", block_network)
     replay = PipelineReplay(monkeypatch, tmp_path)
     api = API(str(tmp_path / "accounts.db"), raise_when_no_account=True)
     await api.pool.add_account(
