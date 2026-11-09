@@ -10,6 +10,8 @@
 - Deactivate suspended accounts reported with code 64 and continue with the
   next account. Selectively adapts upstream
   [#364](https://github.com/vladkens/twscrape/pull/364).
+- Honor explicit suspension and access-denied errors before quota headers.
+  Preserve successful request counts atomically when deactivating an account.
 - Retry transient GraphQL errors behind empty nested object wrappers instead
   of treating them as successful empty results. Persistent failures raise after
   the existing retry limit, preserving results already yielded.

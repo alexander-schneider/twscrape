@@ -242,7 +242,7 @@ class QueueClient:
         await ctx.aclose()
 
         if inactive:
-            await self.pool.mark_inactive(username, msg)
+            await self.pool.mark_inactive(username, msg, queue=self.queue, req_count=ctx.req_count)
             return
 
         if reset_at > 0:
@@ -321,6 +321,13 @@ class QueueClient:
                 f"Update twscrape/api.py and retry. Details: {err_msg}"
             )
 
+        # https://github.com/vladkens/twscrape/issues/211
+        suspended = has_error(errors, "(64) Your account is suspended")
+        if suspended or has_error(errors, "(326) Authorization: Denied by access control"):
+            logger.warning(f"Ban detected: {log_msg}")
+            await self._close_ctx(-1, inactive=True, msg=err_msg)
+            raise HandledError()
+
         # general api rate limit
         if limit_remaining == 0 and limit_reset > utc.ts():
             logger.debug(f"Rate limited: {log_msg}")
@@ -338,13 +345,6 @@ class QueueClient:
         if rate_limited_429 or rate_limited:
             logger.debug(f"Rate limited: {log_msg}")
             await self._close_ctx(limit_reset if limit_reset > utc.ts() else utc.ts() + 60 * 15)
-            raise HandledError()
-
-        # https://github.com/vladkens/twscrape/issues/211
-        suspended = has_error(errors, "(64) Your account is suspended")
-        if suspended or has_error(errors, "(326) Authorization: Denied by access control"):
-            logger.warning(f"Ban detected: {log_msg}")
-            await self._close_ctx(-1, inactive=True, msg=err_msg)
             raise HandledError()
 
         if has_error(errors, "(32) Could not authenticate you"):

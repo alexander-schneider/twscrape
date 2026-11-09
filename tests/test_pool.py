@@ -164,6 +164,19 @@ async def test_relogin_skips_cookie_accounts(pool_mock: AccountsPool, monkeypatc
     assert (await pool_mock.get("user1")).active is True
 
 
+async def test_mark_inactive_without_queue_preserves_usage(pool_mock: AccountsPool):
+    await pool_mock.add_account_cookies("user1", "auth_token=token; ct0=csrf")
+    account = await pool_mock.get("user1")
+    account.stats = {"SearchTimeline": 3, "TweetDetail": 2}
+    await pool_mock.save(account)
+
+    await pool_mock.mark_inactive("user1", "expired")
+
+    saved = await pool_mock.get("user1")
+    assert not saved.active and saved.error_msg == "expired"
+    assert saved.stats == {"SearchTimeline": 3, "TweetDetail": 2}
+
+
 async def test_get_all(pool_mock: AccountsPool):
     # should return empty list
     accs = await pool_mock.get_all()
