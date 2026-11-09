@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Refresh SearchTimeline and TweetDetail operation IDs from upstream v0.21.0.
+- Cool and rotate rate-limited accounts when response headers are missing or
+  expired. Preserve usable data and keep accounts active after HTTP 429.
+- Deactivate suspended accounts reported with code 64 and continue with the
+  next account. Selectively adapts upstream
+  [#364](https://github.com/vladkens/twscrape/pull/364).
+- Honor explicit suspension and access-denied errors before quota headers.
+  Preserve successful request counts atomically when deactivating an account.
+- Retry transient GraphQL errors behind empty nested object wrappers instead
+  of treating them as successful empty results. Persistent failures raise after
+  the existing retry limit, preserving results already yielded.
+
 ## v0.21.1 - 2026-10-28
 
 ### Fixed

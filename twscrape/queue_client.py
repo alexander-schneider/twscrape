@@ -74,7 +74,15 @@ def has_data(rep: Response, res: Any) -> bool:
         return False
 
     data = res.get("data")
-    return isinstance(data, dict) and any(value not in (None, {}, []) for value in data.values())
+    if not isinstance(data, dict):
+        return False
+
+    def present(value):
+        if isinstance(value, dict):
+            return any(present(item) for item in value.values())
+        return value is not None
+
+    return any(value not in (None, {}, []) and present(value) for value in data.values())
 
 
 def has_error(errors: list[str], prefix: str) -> bool:
@@ -234,7 +242,7 @@ class QueueClient:
         await ctx.aclose()
 
         if inactive:
-            await self.pool.mark_inactive(username, msg)
+            await self.pool.mark_inactive(username, msg, queue=self.queue, req_count=ctx.req_count)
             return
 
         if reset_at > 0:
@@ -273,6 +281,7 @@ class QueueClient:
 
         limit_remaining = int(rep.headers.get("x-rate-limit-remaining", -1))
         limit_reset = int(rep.headers.get("x-rate-limit-reset", -1))
+        rate_limited_429 = rep.status_code == 429
         # limit_max = int(rep.headers.get("x-rate-limit-limit", -1))
 
         errors: list[str] = []
@@ -312,21 +321,30 @@ class QueueClient:
                 f"Update twscrape/api.py and retry. Details: {err_msg}"
             )
 
+        # https://github.com/vladkens/twscrape/issues/211
+        suspended = has_error(errors, "(64) Your account is suspended")
+        if suspended or has_error(errors, "(326) Authorization: Denied by access control"):
+            logger.warning(f"Ban detected: {log_msg}")
+            await self._close_ctx(-1, inactive=True, msg=err_msg)
+            raise HandledError()
+
         # general api rate limit
-        if limit_remaining == 0 and limit_reset > 0:
+        if limit_remaining == 0 and limit_reset > utc.ts():
             logger.debug(f"Rate limited: {log_msg}")
             await self._close_ctx(limit_reset)
             raise HandledError()
 
         # no way to check is account banned in direct way, but this check should work
-        if has_error(errors, "(88) Rate limit exceeded") and limit_remaining > 0:
+        rate_limited = has_error(errors, "(88) Rate limit exceeded") and not has_data(rep, res)
+        if rate_limited and limit_remaining > 0 and not rate_limited_429:
             logger.warning(f"Ban detected: {log_msg}")
             await self._close_ctx(-1, inactive=True, msg=err_msg)
             raise HandledError()
 
-        if has_error(errors, "(326) Authorization: Denied by access control"):
-            logger.warning(f"Ban detected: {log_msg}")
-            await self._close_ctx(-1, inactive=True, msg=err_msg)
+        # https://github.com/vladkens/twscrape/issues/351
+        if rate_limited_429 or rate_limited:
+            logger.debug(f"Rate limited: {log_msg}")
+            await self._close_ctx(limit_reset if limit_reset > utc.ts() else utc.ts() + 60 * 15)
             raise HandledError()
 
         if has_error(errors, "(32) Could not authenticate you"):

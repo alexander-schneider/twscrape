@@ -403,12 +403,26 @@ class AccountsPool:
 
         return None
 
-    async def mark_inactive(self, username: str, error_msg: str | None):
+    async def mark_inactive(
+        self, username: str, error_msg: str | None, *, queue: str | None = None, req_count=0
+    ):
         qs = """
-        UPDATE accounts SET active = false, error_msg = :error_msg
+        UPDATE accounts SET active = false, error_msg = :error_msg,
+            stats = CASE WHEN :queue_path IS NULL THEN stats ELSE
+                json_set(stats, :queue_path, COALESCE(json_extract(stats, :queue_path), 0) + :req_count)
+            END
         WHERE username = :username
         """
-        await execute(self._db_file, qs, {"username": username, "error_msg": error_msg})
+        await execute(
+            self._db_file,
+            qs,
+            {
+                "username": username,
+                "error_msg": error_msg,
+                "queue_path": f"$.{queue}" if queue is not None else None,
+                "req_count": req_count,
+            },
+        )
 
     async def stats(self):
         def locks_count(queue: str):

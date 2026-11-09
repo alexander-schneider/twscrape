@@ -10,10 +10,10 @@ from .queue_client import QueueClient
 from .utils import encode_params, find_obj, get_by_path
 
 # OP_{NAME} – {NAME} should be same as second part of GQL ID (required to auto-update script)
-OP_SearchTimeline = "hyPfJYJ_XAtDYoslQc-Rgg/SearchTimeline"
+OP_SearchTimeline = "vLHjqbDv7TPFMBkIIO1nOA/SearchTimeline"
 OP_UserByRestId = "xvmVfRLmnr1alc5f2dib0Q/UserByRestId"
 OP_UserByScreenName = "Gb-d6r0vxPOADdG62OEBpQ/UserByScreenName"
-OP_TweetDetail = "XMOz5h24KAZ86qKffKTLdQ/TweetDetail"
+OP_TweetDetail = "dQDdKtt882nl-Km98FJGSQ/TweetDetail"
 OP_Followers = "JNyQdTISpzCkj_1fqxDvFg/Followers"
 OP_Following = "qGZZDF3mp91q7X22s3HxpA/Following"
 OP_Retweeters = "ROjiuYueotTnWoI8m2YaiQ/Retweeters"
