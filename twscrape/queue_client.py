@@ -273,6 +273,7 @@ class QueueClient:
 
         limit_remaining = int(rep.headers.get("x-rate-limit-remaining", -1))
         limit_reset = int(rep.headers.get("x-rate-limit-reset", -1))
+        rate_limited_429 = rep.status_code == 429
         # limit_max = int(rep.headers.get("x-rate-limit-limit", -1))
 
         errors: list[str] = []
@@ -313,18 +314,27 @@ class QueueClient:
             )
 
         # general api rate limit
-        if limit_remaining == 0 and limit_reset > 0:
+        if limit_remaining == 0 and limit_reset > utc.ts():
             logger.debug(f"Rate limited: {log_msg}")
             await self._close_ctx(limit_reset)
             raise HandledError()
 
         # no way to check is account banned in direct way, but this check should work
-        if has_error(errors, "(88) Rate limit exceeded") and limit_remaining > 0:
+        rate_limited = has_error(errors, "(88) Rate limit exceeded") and not has_data(rep, res)
+        if rate_limited and limit_remaining > 0 and not rate_limited_429:
             logger.warning(f"Ban detected: {log_msg}")
             await self._close_ctx(-1, inactive=True, msg=err_msg)
             raise HandledError()
 
-        if has_error(errors, "(326) Authorization: Denied by access control"):
+        # https://github.com/vladkens/twscrape/issues/351
+        if rate_limited_429 or rate_limited:
+            logger.debug(f"Rate limited: {log_msg}")
+            await self._close_ctx(limit_reset if limit_reset > utc.ts() else utc.ts() + 60 * 15)
+            raise HandledError()
+
+        # https://github.com/vladkens/twscrape/issues/211
+        suspended = has_error(errors, "(64) Your account is suspended")
+        if suspended or has_error(errors, "(326) Authorization: Denied by access control"):
             logger.warning(f"Ban detected: {log_msg}")
             await self._close_ctx(-1, inactive=True, msg=err_msg)
             raise HandledError()
