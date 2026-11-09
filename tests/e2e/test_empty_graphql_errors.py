@@ -52,8 +52,10 @@ async def test_persistent_empty_search_error_raises_after_prior_results(pipeline
 @pytest.mark.parametrize("ids", [[], [913]])
 async def test_explicit_timeline_results_survive_server_warning(pipeline, ids):
     wire, api = pipeline
-    body = page(*(tweet(tid) for tid in ids))
-    body["errors"] = [{"message": "Internal server error"}]
+    body = {
+        **page(*(tweet(tid) for tid in ids)),
+        "errors": [{"message": "Internal server error"}],
+    }
     wire.enqueue(body)
 
     assert [item.id async for item in api.search("example")] == ids

@@ -93,8 +93,10 @@ async def test_rate_warning_keeps_data_and_account_with_remaining_quota(pipeline
         "offline-1", "_", "_", "_", cookies="auth_token=dummy-offline-1; ct0=dummy-csrf-offline-1"
     )
     first_response_headers(monkeypatch, {"x-rate-limit-remaining": "5"})
-    body = page(tweet(904), cursor="next")
-    body["errors"] = [{"code": 88, "message": "Rate limit exceeded"}]
+    body = {
+        **page(tweet(904), cursor="next"),
+        "errors": [{"code": 88, "message": "Rate limit exceeded"}],
+    }
     wire.enqueue(body, page(tweet(905)))
 
     assert [item.id async for item in api.search("example")] == [904, 905]
