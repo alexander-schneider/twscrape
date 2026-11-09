@@ -74,7 +74,15 @@ def has_data(rep: Response, res: Any) -> bool:
         return False
 
     data = res.get("data")
-    return isinstance(data, dict) and any(value not in (None, {}, []) for value in data.values())
+    if not isinstance(data, dict):
+        return False
+
+    def present(value):
+        if isinstance(value, dict):
+            return any(present(item) for item in value.values())
+        return value is not None
+
+    return any(value not in (None, {}, []) and present(value) for value in data.values())
 
 
 def has_error(errors: list[str], prefix: str) -> bool:
