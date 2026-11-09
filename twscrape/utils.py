@@ -124,6 +124,18 @@ def get_typed_object(obj: dict, res: defaultdict[str, list]):
     return res
 
 
+RT_ID_PATH = [
+    "retweeted_status_id_str",
+    "retweeted_status_result.result.rest_id",
+    "retweeted_status_result.result.tweet.rest_id",
+]
+QT_ID_PATH = [
+    "quoted_status_id_str",
+    "quoted_status_result.result.rest_id",
+    "quoted_status_result.result.tweet.rest_id",
+]
+
+
 def _get_timeline_tweet_ids(obj: Any) -> set[str]:
     ids: set[str] = set()
     if isinstance(obj, dict):
@@ -318,20 +330,16 @@ def to_old_rep(obj: dict) -> dict[str, Any]:
     trends = [x for x in tmp.get("TimelineTrend", [])]
     trends = {x["name"]: x for x in trends}
 
-    retweeted_ids = {
-        str(retweeted_id)
+    embedded_ids = {
+        str(embedded_id)
         for tweet in tweets.values()
-        for path in (
-            "retweeted_status_id_str",
-            "retweeted_status_result.result.rest_id",
-            "retweeted_status_result.result.tweet.rest_id",
-        )
-        if (retweeted_id := get_or(tweet, path)) is not None
+        for path in (*RT_ID_PATH, *QT_ID_PATH)
+        if (embedded_id := get_or(tweet, path)) is not None
     }
 
     return {
         "tweets": tweets,
-        "retweeted_ids": retweeted_ids,
+        "embedded_ids": embedded_ids,
         "timeline_tweet_ids": timeline_tweet_ids,
         "users": users,
         "trends": trends,
