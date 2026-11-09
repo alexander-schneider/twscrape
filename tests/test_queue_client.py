@@ -454,7 +454,7 @@ async def test_malformed_api_errors_fail_closed(
     assert "SearchTimeline" in user1.locks
 
 
-async def test_service_unavailable_raises_typed_error_without_cooling_account_after_retries(
+async def test_service_unavailable_raises_typed_error_after_moving_to_free_account(
     httpx_mock: HTTPXMock, client_fixture: CF, monkeypatch
 ):
     pool, client = client_fixture
@@ -474,11 +474,14 @@ async def test_service_unavailable_raises_typed_error_without_cooling_account_af
     with pytest.raises(ServiceUnavailableError, match="ServiceUnavailable"):
         await client.get(URL)
 
+    assert [request.headers["x-csrf-token"] for request in httpx_mock.get_requests()] == [
+        "csrf1",
+        "csrf2",
+        "csrf2",
+    ]
     assert client.ctx is not None
-    assert client.ctx.acc.username == "user1"
-
-    user1 = await pool.get("user1")
-    assert "SearchTimeline" in user1.locks
+    assert client.ctx.acc.username == "user2"
+    assert await get_locked(pool) == {"user2"}
 
 
 @pytest.mark.parametrize(
@@ -505,7 +508,7 @@ async def _mock_sleep(*args, **kwargs):
     return None
 
 
-async def test_transient_x_api_error_retries_with_same_account(
+async def test_transient_x_api_error_moves_to_free_account(
     httpx_mock: HTTPXMock, client_fixture: CF, monkeypatch
 ):
     pool, client = client_fixture
@@ -526,10 +529,10 @@ async def test_transient_x_api_error_retries_with_same_account(
 
     assert rep is not None
     assert rep.json() == {"foo": "ok"}
-    assert getattr(rep, "__username", None) == "user1"
+    assert getattr(rep, "__username", None) == "user2"
 
     locked = await get_locked(pool)
-    assert locked == {"user1"}
+    assert locked == {"user1", "user2"}
 
 
 @pytest.mark.parametrize(
@@ -541,7 +544,7 @@ async def test_transient_x_api_error_retries_with_same_account(
         {"code": 29, "message": "Timeout: Unspecified"},
     ],
 )
-async def test_transient_x_api_errors_raise_typed_error_without_cooling_account_after_retries(
+async def test_transient_x_api_errors_raise_typed_error_after_moving_to_free_account(
     error: dict[str, int | str],
     httpx_mock: HTTPXMock,
     client_fixture: CF,
@@ -566,10 +569,8 @@ async def test_transient_x_api_errors_raise_typed_error_without_cooling_account_
     assert str(exc_info.value).startswith("Transient X API error")
 
     assert client.ctx is not None
-    assert client.ctx.acc.username == "user1"
-
-    user1 = await pool.get("user1")
-    assert "SearchTimeline" in user1.locks
+    assert client.ctx.acc.username == "user2"
+    assert await get_locked(pool) == {"user2"}
 
 
 async def test_html_403_cools_only_the_current_queue(httpx_mock: HTTPXMock, client_fixture: CF):
@@ -642,7 +643,7 @@ async def test_ctx_closed_on_break(httpx_mock: HTTPXMock, client_fixture: CF):
 
 
 @pytest.mark.parametrize("empty", [None, {}, []])
-async def test_deadline_with_empty_data_retries_same_account(
+async def test_deadline_with_empty_data_moves_to_free_account(
     empty, httpx_mock: HTTPXMock, client_fixture: CF, monkeypatch
 ):
     pool, client = client_fixture
@@ -661,10 +662,11 @@ async def test_deadline_with_empty_data_retries_same_account(
 
     assert rep is not None
     assert rep.json() == {"data": {"user": {"id": "42"}}}
-    assert getattr(rep, "__username") == "user1"
+    assert getattr(rep, "__username") == "user2"
     assert len(httpx_mock.get_requests()) == 2
     assert (await pool.get("user1")).active is True
-    assert (await pool.get("user1")).locks == {}
+    assert (await pool.get("user1")).locks.keys() == {"SearchTimeline"}
+    assert (await pool.get("user2")).locks == {}
 
 
 @pytest.mark.parametrize("data", [0, False, {"items": []}])

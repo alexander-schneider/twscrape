@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.21.3 - 2026-11-09
+
+### Fixed
+
+- Move a search to a free account after a temporary X failure and hold the
+  failing account for search for five minutes. X answered SearchTimeline for
+  some accounts with HTTP 200 and `(-1) Internal server error` while other
+  accounts worked; the request retried the refused account until it failed.
+  Without a free account, the request still retries the current one. If every
+  account it tried fails, the failure is X-wide: the request releases those
+  accounts and raises after the existing three requests. Other operations keep
+  retrying the same account.
+
 ## v0.21.2 - 2026-11-09
 
 ### Fixed
