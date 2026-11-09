@@ -1,14 +1,25 @@
 # Changelog
 
-## Unreleased
+## v0.21.3 - 2026-11-09
 
 ### Fixed
 
+- Move a search to a free account after a temporary X failure and hold the
+  failing account for search for five minutes. X answered SearchTimeline for
+  some accounts with HTTP 200 and `(-1) Internal server error` while other
+  accounts worked; the request retried the refused account until it failed.
+  Without a free account, the request still retries the current one. If every
+  account it tried fails, the failure is X-wide: the request releases those
+  accounts and raises after the existing three requests. Other operations keep
+  retrying the same account.
 - Do not yield tweets that X only embeds as the quote of another result. A
   quoted tweet that has its own timeline entry is still yielded. Search,
   timelines and lists return fewer items: in the recorded search fixture 10
   instead of 11. Selectively adapts the parser part of upstream
   [#338](https://github.com/vladkens/twscrape/pull/338).
+
+Changes: [PR #26](https://github.com/alexander-schneider/twscrape/pull/26) and
+[PR #27](https://github.com/alexander-schneider/twscrape/pull/27).
 
 ## v0.21.2 - 2026-11-09
 
