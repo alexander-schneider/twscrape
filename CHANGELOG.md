@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.21.2 - 2026-11-09
 
 ### Fixed
 
@@ -15,6 +15,8 @@
 - Retry transient GraphQL errors behind empty nested object wrappers instead
   of treating them as successful empty results. Persistent failures raise after
   the existing retry limit, preserving results already yielded.
+
+Changes: [PR #24](https://github.com/alexander-schneider/twscrape/pull/24).
 
 ## v0.21.1 - 2026-10-28
 
