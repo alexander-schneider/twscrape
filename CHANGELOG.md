@@ -8,8 +8,9 @@
   failing account for that operation for five minutes. X answered SearchTimeline
   for some accounts with HTTP 200 and `(-1) Internal server error` while other
   accounts worked; the request retried the refused account until it failed.
-  Without a free account, the request still retries the current one, so a
-  failure on every account raises after the existing three requests.
+  Without a free account, the request still retries the current one. If every
+  account it tried fails, the failure is X-wide: the request releases those
+  accounts and raises after the existing three requests.
 
 ## v0.21.2 - 2026-11-09
 

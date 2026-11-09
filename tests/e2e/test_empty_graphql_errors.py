@@ -110,5 +110,5 @@ async def test_empty_search_error_on_every_account_still_raises_after_retry_limi
         "offline-1",
         "offline-1",
     ]
-    assert (await api.pool.get("offline-0")).locks.keys() == {"SearchTimeline"}
+    assert (await api.pool.get("offline-0")).locks == {}
     assert (await api.pool.get("offline-1")).locks == {}

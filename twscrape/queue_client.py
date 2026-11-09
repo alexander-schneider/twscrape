@@ -266,14 +266,15 @@ class QueueClient:
         self.ctx = Ctx(acc, clt, proxy=self.proxy)
         return self.ctx
 
-    async def _move_to_free_account(self):
+    async def _move_to_free_account(self) -> bool:
         # X can fail one queue for some accounts only; keep the current account if none is free.
         acc = await self.pool.get_for_queue(self.queue)
         if acc is None:
-            return
+            return False
 
         await self._close_ctx(utc.ts() + TRANSIENT_API_ERROR_COOLDOWN_SECONDS)
         self.ctx = Ctx(acc, acc.make_client(proxy=self.proxy), proxy=self.proxy)
+        return True
 
     async def _check_rep(self, rep: Response) -> None:
         """
@@ -454,6 +455,7 @@ class QueueClient:
         json: Any = None,
     ) -> Response | None:
         unknown_retry, transient_api_retry = 0, 0
+        held: list[str] = []
 
         while True:
             ctx = await self._get_ctx()  # not need to close client, class implements __aexit__
@@ -482,8 +484,12 @@ class QueueClient:
             except ServiceUnavailableError as e:
                 transient_api_retry += 1
                 if transient_api_retry >= TRANSIENT_API_ERROR_RETRY_LIMIT:
+                    # Every account tried failed, so X failed as a whole: release them.
+                    for username in held:
+                        await self.pool.unlock(username, self.queue)
                     raise e
-                await self._move_to_free_account()
+                if await self._move_to_free_account():
+                    held.append(ctx.acc.username)
                 await asyncio.sleep(1)
             except UnexpectedApiError:
                 raise

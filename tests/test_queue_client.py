@@ -481,7 +481,7 @@ async def test_service_unavailable_raises_typed_error_after_moving_to_free_accou
     ]
     assert client.ctx is not None
     assert client.ctx.acc.username == "user2"
-    assert await get_locked(pool) == {"user1", "user2"}
+    assert await get_locked(pool) == {"user2"}
 
 
 @pytest.mark.parametrize(
@@ -570,7 +570,7 @@ async def test_transient_x_api_errors_raise_typed_error_after_moving_to_free_acc
 
     assert client.ctx is not None
     assert client.ctx.acc.username == "user2"
-    assert await get_locked(pool) == {"user1", "user2"}
+    assert await get_locked(pool) == {"user2"}
 
 
 async def test_html_403_cools_only_the_current_queue(httpx_mock: HTTPXMock, client_fixture: CF):

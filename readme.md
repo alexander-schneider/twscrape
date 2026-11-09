@@ -138,7 +138,8 @@ their retry and partial-result policy. The library preserves its own bounded
 request retries and account rotation. X can fail one operation for some accounts
 only, so a temporary failure moves the request to a free account and holds the
 failing account for that operation for five minutes. Without a free account, the
-request retries the current one.
+request retries the current one. If every account it tried fails, the request
+releases them and raises.
 
 `AbortReqError` and `XClIdParseError` are also exported from `twscrape`. Requests
 raise these errors when aborted or when transaction-ID parsing fails, instead of
