@@ -112,3 +112,17 @@ async def test_empty_search_error_on_every_account_still_raises_after_retry_limi
     ]
     assert (await api.pool.get("offline-0")).locks == {}
     assert (await api.pool.get("offline-1")).locks == {}
+
+
+async def test_reply_error_retries_the_same_account_without_holding_it(pipeline):
+    wire, api = pipeline
+    await add_second_account(api)
+    deadline = {
+        "data": {"threaded_conversation_with_injections_v2": {}},
+        "errors": [{"code": -1, "message": "DeadlineExceeded: Unspecified"}],
+    }
+    wire.enqueue(deadline, page(tweet(931, parent=930)), operation="TweetDetail")
+
+    assert [item.id async for item in api.tweet_replies(930)] == [931]
+    assert [request["dummy_account"] for request in wire.requests] == ["offline-0", "offline-0"]
+    assert (await api.pool.get("offline-0")).locks == {}

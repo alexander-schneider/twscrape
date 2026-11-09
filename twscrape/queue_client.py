@@ -267,7 +267,7 @@ class QueueClient:
         return self.ctx
 
     async def _move_to_free_account(self) -> bool:
-        # X can fail one queue for some accounts only; keep the current account if none is free.
+        # A pool without a free account keeps retrying the current one, as before.
         acc = await self.pool.get_for_queue(self.queue)
         if acc is None:
             return False
@@ -488,7 +488,9 @@ class QueueClient:
                     for username in held:
                         await self.pool.unlock(username, self.queue)
                     raise e
-                if await self._move_to_free_account():
+                # X refuses SearchTimeline for some accounts only (vladkens/twscrape#367).
+                # Other operations keep retrying the same account.
+                if self.queue == "SearchTimeline" and await self._move_to_free_account():
                     held.append(ctx.acc.username)
                 await asyncio.sleep(1)
             except UnexpectedApiError:
