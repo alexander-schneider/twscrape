@@ -20,6 +20,7 @@ LOADSHED_RETRY_LIMIT = 3
 TRANSPORT_ERROR_COOLDOWN_SECONDS = 60
 TRANSPORT_ERROR_RETRY_LIMIT = 3
 TRANSIENT_API_ERROR_RETRY_LIMIT = 3
+TRANSIENT_API_ERROR_COOLDOWN_SECONDS = 60 * 5
 UNKNOWN_API_ERROR_COOLDOWN_SECONDS = 60 * 15
 
 
@@ -265,6 +266,15 @@ class QueueClient:
         self.ctx = Ctx(acc, clt, proxy=self.proxy)
         return self.ctx
 
+    async def _move_to_free_account(self):
+        # X can fail one queue for some accounts only; keep the current account if none is free.
+        acc = await self.pool.get_for_queue(self.queue)
+        if acc is None:
+            return
+
+        await self._close_ctx(utc.ts() + TRANSIENT_API_ERROR_COOLDOWN_SECONDS)
+        self.ctx = Ctx(acc, acc.make_client(proxy=self.proxy), proxy=self.proxy)
+
     async def _check_rep(self, rep: Response) -> None:
         """
         This function can raise Exception and request will be retried or aborted
@@ -473,6 +483,7 @@ class QueueClient:
                 transient_api_retry += 1
                 if transient_api_retry >= TRANSIENT_API_ERROR_RETRY_LIMIT:
                     raise e
+                await self._move_to_free_account()
                 await asyncio.sleep(1)
             except UnexpectedApiError:
                 raise
