@@ -675,6 +675,12 @@ async def test_user_tweets_and_replies():
     for doc in tweets:
         check_tweet(doc)
 
+    ids = {doc.id_str for doc in tweets}
+    # quoted, but also listed as rows of profile-conversation modules
+    assert {"1887669545998929945", "1894426290406773113"} <= ids
+    # only embedded as a quote
+    assert "1877581125608153389" not in ids
+
 
 async def test_raw_user_media():
     api = get_api()

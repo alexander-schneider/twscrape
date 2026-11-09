@@ -14,16 +14,11 @@ from typing import Generator, Optional, Union
 import httpx
 
 from .logger import logger
-from .utils import find_item, get_or, int_or, to_old_obj, to_old_rep, utc
+from .utils import QT_ID_PATH, RT_ID_PATH, find_item, get_or, int_or, to_old_obj, to_old_rep, utc
 
 PARSE_ERROR_DUMP_DIR = os.path.join(tempfile.gettempdir(), "twscrape")
 PARSE_ERROR_DUMP_LIMIT = 5
 PARSE_ERROR_LIMIT_PER_RESPONSE = 10
-_RT_ID_PATH = [
-    "retweeted_status_id_str",
-    "retweeted_status_result.result.rest_id",
-    "retweeted_status_result.result.tweet.rest_id",
-]
 
 
 class ParseDriftError(Exception):
@@ -291,14 +286,8 @@ class Tweet(JSONTrait):
     def parse(obj: dict, res: dict, author: dict | None = None):
         tw_usr = User.parse(_get_tweet_user_obj(obj, res, author))
 
-        qt_id_path = [
-            "quoted_status_id_str",
-            "quoted_status_result.result.rest_id",
-            "quoted_status_result.result.tweet.rest_id",
-        ]
-
-        rt_obj = get_or(res, f"tweets.{_first(obj, _RT_ID_PATH)}")
-        qt_obj = get_or(res, f"tweets.{_first(obj, qt_id_path)}")
+        rt_obj = get_or(res, f"tweets.{_first(obj, RT_ID_PATH)}")
+        qt_obj = get_or(res, f"tweets.{_first(obj, QT_ID_PATH)}")
 
         url = f"https://x.com/{tw_usr.username or 'i'}/status/{obj['id_str']}"
         doc = Tweet(
@@ -777,7 +766,7 @@ def _referenced_author(parent: dict, nested: dict) -> dict | None:
     )
     author = {**(mention or {}), "id_str": user_id}
 
-    if not author.get("screen_name") and _first(parent, _RT_ID_PATH) == nested.get("id_str"):
+    if not author.get("screen_name") and _first(parent, RT_ID_PATH) == nested.get("id_str"):
         match = re.match(r"RT @(\w+): ", parent.get("full_text", ""))
         if match:
             author["screen_name"] = match.group(1)
@@ -854,7 +843,7 @@ def _parse_items(rep: httpx.Response | dict, kind: str, limit: int = -1):
     # check for dict, because httpx.Response can be mocked in tests with different type
     res = rep if isinstance(rep, dict) else rep.json()
     obj = to_old_rep(res)
-    embedded_ids: set[str] = obj.get("retweeted_ids", set()) | obj.get("quoted_ids", set())
+    embedded_ids: set[str] = obj.get("embedded_ids", set())
     timeline_tweet_ids: set[str] = obj.get("timeline_tweet_ids", set())
 
     ids = set()
