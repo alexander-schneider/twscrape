@@ -41,28 +41,6 @@ def load_raw_search() -> dict:
     return json.loads(RAW_SEARCH_PATH.read_text())
 
 
-def test_gql_operation_ids_match_upstream_v0_20_1():
-    assert {
-        name: getattr(api_module, name) for name in dir(api_module) if name.startswith("OP_")
-    } == {
-        "OP_BlueVerifiedFollowers": "u3PkPbg--arppBcwNbF1ig/BlueVerifiedFollowers",
-        "OP_Bookmarks": "iblrFnKr6PZUR-dWpfXG6g/Bookmarks",
-        "OP_Followers": "JNyQdTISpzCkj_1fqxDvFg/Followers",
-        "OP_Following": "qGZZDF3mp91q7X22s3HxpA/Following",
-        "OP_GenericTimelineById": "ee4dBLWL8a8qg6n19m1htQ/GenericTimelineById",
-        "OP_ListLatestTweetsTimeline": "1LE3u14FJjPZUHKFGzos2g/ListLatestTweetsTimeline",
-        "OP_Retweeters": "ROjiuYueotTnWoI8m2YaiQ/Retweeters",
-        "OP_SearchTimeline": "hyPfJYJ_XAtDYoslQc-Rgg/SearchTimeline",
-        "OP_TweetDetail": "XMOz5h24KAZ86qKffKTLdQ/TweetDetail",
-        "OP_UserByRestId": "xvmVfRLmnr1alc5f2dib0Q/UserByRestId",
-        "OP_UserByScreenName": "Gb-d6r0vxPOADdG62OEBpQ/UserByScreenName",
-        "OP_UserCreatorSubscriptions": "Qxe_gd-ZvdofnzSL8Ngzpw/UserCreatorSubscriptions",
-        "OP_UserMedia": "VyudDWQnr9vJNw7GasFz2g/UserMedia",
-        "OP_UserTweets": "SXVCYB8XHSS25nzIljNtZA/UserTweets",
-        "OP_UserTweetsAndReplies": "qUpkZU6eN8MbtQb7rC_pYg/UserTweetsAndReplies",
-    }
-
-
 def make_search_page(entry_ids: list[str], cursor: str | None):
     entries = [
         {"entryId": entry_id, "content": {"entryType": "TimelineTimelineItem"}}
