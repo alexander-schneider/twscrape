@@ -204,6 +204,8 @@ async def test_search():
     for doc in items:
         check_tweet(doc)
         bookmarks_count += doc.bookmarkedCount
+        if doc.quotedTweet is not None:
+            bookmarks_count += doc.quotedTweet.bookmarkedCount
 
     assert bookmarks_count > 0, "`bookmark_fields` key is changed or unluck search data"
 

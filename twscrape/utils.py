@@ -329,9 +329,21 @@ def to_old_rep(obj: dict) -> dict[str, Any]:
         if (retweeted_id := get_or(tweet, path)) is not None
     }
 
+    quoted_ids = {
+        str(quoted_id)
+        for tweet in tweets.values()
+        for path in (
+            "quoted_status_id_str",
+            "quoted_status_result.result.rest_id",
+            "quoted_status_result.result.tweet.rest_id",
+        )
+        if (quoted_id := get_or(tweet, path)) is not None
+    }
+
     return {
         "tweets": tweets,
         "retweeted_ids": retweeted_ids,
+        "quoted_ids": quoted_ids,
         "timeline_tweet_ids": timeline_tweet_ids,
         "users": users,
         "trends": trends,
