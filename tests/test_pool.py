@@ -438,3 +438,45 @@ async def test_get_for_queue_or_wait_takes_an_account_freed_during_the_check(
 
     account = await pool.get_for_queue_or_wait("SearchTimeline")
     assert account is not None and account.username == "user2"
+
+
+async def test_get_for_queue_or_wait_gives_up_when_an_expired_global_lock_overlaps_a_search_lock(
+    pool_mock: AccountsPool, monkeypatch
+):
+    """The account's global lock has ended but its SearchTimeline lock runs for 6 more hours: the account is not
+    available for search before the later of the two, so the wait gives up at once instead of polling."""
+    pool = AccountsPool(pool_mock._db_file, wait_timeout=900, raise_when_no_account=True)
+    await pool.add_account("user1", "pass1", "email1", "ep1", cookies="auth_token=t; ct0=c")
+    await pool.lock_until("user1", GLOBAL_LOCK_QUEUE, utc.ts() - 60)
+    await pool.lock_until("user1", "SearchTimeline", utc.ts() + 6 * 3600)
+    await pool.lock_until(
+        "user1", "UserTweets", utc.ts() + 60
+    )  # another queue's lock does not apply
+    slept = []
+
+    async def fake_sleep(interval):
+        slept.append(interval)
+
+    monkeypatch.setattr("twscrape.accounts_pool.asyncio.sleep", fake_sleep)
+
+    wait_s = await pool.seconds_until_available("SearchTimeline")
+    assert wait_s is not None and 6 * 3600 - 5 <= wait_s <= 6 * 3600
+    with pytest.raises(NoAccountError):
+        await pool.get_for_queue_or_wait("SearchTimeline")
+    assert slept == []
+
+
+async def test_seconds_until_available_takes_the_later_lock_per_account_and_the_earliest_account(
+    pool_mock: AccountsPool,
+):
+    for name in ("user1", "user2"):
+        await pool_mock.add_account(name, "p", "e", "ep", cookies="auth_token=t; ct0=c")
+    # user1: search free in 1 hour but globally locked for 3 hours -> 3 hours.
+    await pool_mock.lock_until("user1", "SearchTimeline", utc.ts() + 3600)
+    await pool_mock.lock_until("user1", GLOBAL_LOCK_QUEUE, utc.ts() + 3 * 3600)
+    # user2: global lock over, search lock for 2 hours -> 2 hours, the earliest account.
+    await pool_mock.lock_until("user2", GLOBAL_LOCK_QUEUE, utc.ts() - 60)
+    await pool_mock.lock_until("user2", "SearchTimeline", utc.ts() + 2 * 3600)
+
+    wait_s = await pool_mock.seconds_until_available("SearchTimeline")
+    assert wait_s is not None and 2 * 3600 - 5 <= wait_s <= 2 * 3600

@@ -5,9 +5,10 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from typing import Literal
 
-from httpx import AsyncBaseTransport, AsyncClient, AsyncHTTPTransport
+from httpx import AsyncBaseTransport, AsyncClient, AsyncHTTPTransport, Request, Response
 
 from .models import JSONTrait
+from .redaction import redacted_error
 from .utils import utc
 
 
@@ -24,12 +25,41 @@ def resolve_impersonate(impersonate: str | None) -> str | None:
     return impersonate or os.getenv("TWS_IMPERSONATE") or None
 
 
-def make_transport(proxy: str | None, impersonate: str | None) -> AsyncBaseTransport:
-    if impersonate:
-        from .curl_transport import CurlTransport
+class RedactingTransport(AsyncBaseTransport):
+    """Raises the wrapped transport's errors without the proxy credentials httpx may put into them."""
 
-        return CurlTransport(impersonate, proxy=proxy)
-    return AsyncHTTPTransport(retries=3, proxy=proxy)
+    def __init__(self, transport: AsyncBaseTransport, proxy: str | None):
+        self._transport = transport
+        self._proxy = proxy
+
+    async def handle_async_request(self, request: Request) -> Response:
+        try:
+            return await self._transport.handle_async_request(request)
+        except Exception as error:
+            clean = redacted_error(error, self._proxy)
+            if clean is None:
+                raise
+        raise clean
+
+    async def aclose(self) -> None:
+        await self._transport.aclose()
+
+
+def make_transport(proxy: str | None, impersonate: str | None) -> AsyncBaseTransport:
+    try:
+        if impersonate:
+            from .curl_transport import CurlTransport
+
+            transport: AsyncBaseTransport = CurlTransport(impersonate, proxy=proxy)
+        else:
+            transport = AsyncHTTPTransport(retries=3, proxy=proxy)
+        return RedactingTransport(transport, proxy)
+    except Exception as error:
+        # httpx echoes a malformed proxy URL in its construction error (e.g. a missing scheme).
+        clean = redacted_error(error, proxy)
+        if clean is None:
+            raise
+    raise clean
 
 
 TOKEN = "Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA"

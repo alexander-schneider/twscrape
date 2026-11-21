@@ -6,7 +6,7 @@ from contextlib import aclosing
 import pytest
 
 import twscrape.cli as cli
-from tests.http_replay import error_body, page, tweet
+from tests.http_replay import CONTROL_OK, error_body, page, tweet
 from twscrape import AbortReqError, XClIdParseError
 from twscrape.queue_client import SearchRefusedError, XClIdGenStore
 
@@ -71,7 +71,7 @@ async def test_page_abort_reaches_reader_after_yielded_results(
     # account (vladkens/twscrape#367).
     refused = operation == "SearchTimeline" and status == 404
     if refused:
-        wire.enqueue({"data": {"user": {}}}, operation="UserByScreenName")
+        wire.enqueue(CONTROL_OK, operation="UserByScreenName")
 
     received = []
     with pytest.raises(SearchRefusedError if refused else AbortReqError):

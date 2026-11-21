@@ -151,3 +151,63 @@ async def test_api_calls_look_like_the_web_clients_fetch_not_a_page_load(server,
     assert "origin" not in search
     assert post["origin"] == "https://x.com" and post["referer"] == "https://x.com/"
     assert (page["sec-fetch-mode"], page["sec-fetch-dest"]) == ("navigate", "document")
+
+
+# Fake proxy credentials; a leak shows up as these strings in a log line or an exception text.
+FAKE_PROXY_USER = "fakeproxyuser"
+FAKE_PROXY_PASS = "fakeproxypass"
+
+
+@pytest.mark.parametrize(
+    ("impersonate", "proxy"),
+    [
+        # libcurl echoes the whole proxy URL in "Unsupported proxy syntax in '...'".
+        ("chrome", f"http://{FAKE_PROXY_USER}:{FAKE_PROXY_PASS}@127.0.0.1:notaport"),
+        # httpx echoes a scheme-less proxy URL in "Unknown scheme for proxy URL ...".
+        (None, f"{FAKE_PROXY_USER}:{FAKE_PROXY_PASS}@127.0.0.1:notaport"),
+        (None, f"http://{FAKE_PROXY_USER}:{FAKE_PROXY_PASS}@127.0.0.1:notaport"),
+    ],
+)
+async def test_proxy_credentials_never_reach_logs_or_errors(
+    tmp_path, monkeypatch, impersonate, proxy
+):
+    """A credentialed, malformed account proxy on the real request path (cached signer, retries, cooldown):
+    neither a log line at any level nor the raised error carries the proxy username or password."""
+    from types import SimpleNamespace
+
+    from loguru import logger
+
+    import twscrape.queue_client as queue_client_module
+    from twscrape.accounts_pool import AccountsPool
+    from twscrape.queue_client import QueueClient
+
+    async def no_sleep(*args, **kwargs):
+        return None
+
+    # Only the queue client's retry pauses; curl-cffi's own event-loop timers need the real asyncio.sleep.
+    monkeypatch.setattr(queue_client_module, "asyncio", SimpleNamespace(sleep=no_sleep))
+    monkeypatch.delenv("TWS_PROXY", raising=False)
+    monkeypatch.delenv("TWS_IMPERSONATE", raising=False)
+    pool = AccountsPool(str(tmp_path / "accounts.db"), raise_when_no_account=True)
+    await pool.add_account("u1", "_", "_", "_", proxy=proxy, cookies="auth_token=tok; ct0=csrf")
+    client = QueueClient(pool, "SearchTimeline", impersonate=impersonate)
+
+    lines: list[str] = []
+    sink = logger.add(lambda message: lines.append(str(message)), level="TRACE")
+    try:
+        with pytest.raises(Exception) as exc_info:
+            await client.get("http://127.0.0.1:9/i/api/graphql/x/SearchTimeline")
+    finally:
+        logger.remove(sink)
+        await client._close_ctx()
+
+    error = exc_info.value
+    texts = [*lines, str(error), repr(error)]
+    cause = error.__cause__ or error.__context__
+    while cause is not None:
+        texts += [str(cause), repr(cause)]
+        cause = cause.__cause__ or cause.__context__
+    for text in texts:
+        assert FAKE_PROXY_USER not in text and FAKE_PROXY_PASS not in text, text
+    if impersonate:
+        assert any("Transport error" in line for line in lines)  # the WARNING after the retries

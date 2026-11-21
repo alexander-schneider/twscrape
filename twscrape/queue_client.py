@@ -28,18 +28,29 @@ CONTROL_SCREEN_NAME = "X"
 # A search 404 with a failing control read (bad signature, account out everywhere). Longer than the 15-minute
 # in-use horizon of AccountsPool.get_for_queue_or_wait, so other searches give up at once instead of waiting.
 SIGNING_FAILURE_COOLDOWN_SECONDS = 30 * 60
+DEFAULT_SEARCH_REFUSAL_FIRST_LOCK_SECONDS = 30 * 60
 DEFAULT_SEARCH_REFUSAL_LOCK_SECONDS = 6 * 60 * 60
 
 
-def search_refusal_lock_seconds() -> int:
-    """How long an account X refused search for stays out of search (TWS_SEARCH_REFUSAL_LOCK_SECONDS)."""
+def _env_seconds(name: str, default: int) -> int:
     try:
-        return max(
-            60,
-            int(os.getenv("TWS_SEARCH_REFUSAL_LOCK_SECONDS", DEFAULT_SEARCH_REFUSAL_LOCK_SECONDS)),
-        )
+        return max(60, int(os.getenv(name, default)))
     except ValueError:
-        return DEFAULT_SEARCH_REFUSAL_LOCK_SECONDS
+        return default
+
+
+def search_refusal_lock_seconds(refusals: int = 1) -> int:
+    """How long an account X refused search for stays out of search after its `refusals`-th consecutive refusal.
+
+    TWS_SEARCH_REFUSAL_FIRST_LOCK_SECONDS (default 30 minutes) for the first refusal, doubled for each further
+    one, capped at TWS_SEARCH_REFUSAL_LOCK_SECONDS (default 6 hours): 30 min, 1 h, 2 h, 4 h, 6 h, 6 h...
+    """
+    cap = _env_seconds("TWS_SEARCH_REFUSAL_LOCK_SECONDS", DEFAULT_SEARCH_REFUSAL_LOCK_SECONDS)
+    first = _env_seconds(
+        "TWS_SEARCH_REFUSAL_FIRST_LOCK_SECONDS", DEFAULT_SEARCH_REFUSAL_FIRST_LOCK_SECONDS
+    )
+    doublings = min(max(refusals, 1) - 1, 32)  # 2**32 times a minute is past any cap
+    return min(first * 2**doublings, cap)
 
 
 class HandledError(Exception): ...
@@ -110,6 +121,19 @@ def has_data(rep: Response, res: Any) -> bool:
         return value is not None
 
     return any(value not in (None, {}, []) and present(value) for value in data.values())
+
+
+def has_user_data(rep: Response) -> bool:
+    """A UserByScreenName answer with a user id (data.user.result.rest_id), not only HTTP 200."""
+    if rep.status_code != 200:
+        return False
+    try:
+        res = rep.json()
+    except ValueError:
+        return False
+    user = res.get("data", {}).get("user") if isinstance(res, dict) else None
+    result = user.get("result") if isinstance(user, dict) else None
+    return isinstance(result, dict) and bool(result.get("rest_id"))
 
 
 def has_error(errors: list[str], prefix: str) -> bool:
@@ -323,11 +347,16 @@ class QueueClient:
         return True
 
     async def _quarantine_refused_search(self, reason: str) -> bool:
-        """Keep the refused account out of search for hours and continue with a free account, if any."""
-        lock_seconds = search_refusal_lock_seconds()
-        username = self.ctx.acc.username if self.ctx else "<unknown>"
+        """Keep the refused account out of search, longer for each consecutive refusal, and continue with a free
+        account, if any."""
+        if self.ctx is None:
+            return False
+        username = self.ctx.acc.username
+        refusals = await self.pool.record_refusal(username, self.queue)
+        lock_seconds = search_refusal_lock_seconds(refusals)
         logger.warning(
-            f"Search refused for {username} ({reason}); no searches with it for {lock_seconds}s"
+            f"Search refused for {username} ({reason}, {refusals} in a row); "
+            f"no searches with it for {lock_seconds}s"
         )
         await self._close_ctx(utc.ts() + lock_seconds)
         acc = await self.pool.get_for_queue(self.queue)
@@ -340,7 +369,7 @@ class QueueClient:
         """One signed GraphQL read that search-limited accounts still get (UserByScreenName).
 
         A search-limited account still reads; an account whose every read fails is not search-limited, so it
-        gets no 6-hour search quarantine. Measured live on 2026-11-21: X answered UserByScreenName, TweetDetail
+        gets no search quarantine. Measured live on 2026-11-21: X answered UserByScreenName, TweetDetail
         and UserTweets with 200 also for a random or missing x-client-transaction-id, so this read does not
         detect a broken signature; tests/test_xclid_browser_vectors.py guards the signature instead.
         """
@@ -364,7 +393,29 @@ class QueueClient:
                 f"Signed control read failed for {ctx.acc.username}: {type(e).__name__}: {e}"
             )
             return False
-        return rep.status_code == 200
+        return has_user_data(rep)
+
+    async def _search_limit_confirmed(self, reason: str) -> bool:
+        """A refused search counts as a search limit only when the signed control read returns user data.
+
+        Otherwise the account cools down for SIGNING_FAILURE_COOLDOWN_SECONDS and the caller fails the request.
+        """
+        if await self._signed_control_succeeds():
+            return True
+        username = self.ctx.acc.username if self.ctx else "<unknown>"
+        logger.warning(
+            f"Search refused for {username} ({reason}) and the signed control read returned no user data: "
+            f"not a search limit. Cooling the account for {SIGNING_FAILURE_COOLDOWN_SECONDS}s"
+        )
+        await self._close_ctx(utc.ts() + SIGNING_FAILURE_COOLDOWN_SECONDS)
+        return False
+
+    @staticmethod
+    def _has_timeline_data(rep: Response) -> bool:
+        try:
+            return has_data(rep, rep.json())
+        except ValueError:
+            return False
 
     @staticmethod
     def _is_search_refusal(err_msg: str) -> bool:
@@ -516,7 +567,12 @@ class QueueClient:
                 )
                 raise HandledError()
 
-            if self.queue == SEARCH_QUEUE and self._is_search_refusal(err_msg):
+            # Only an HTTP 200 answer without timeline data is a refusal; a 5xx stays transient.
+            if (
+                self.queue == SEARCH_QUEUE
+                and rep.status_code == 200
+                and self._is_search_refusal(err_msg)
+            ):
                 raise SearchRefusedError(
                     f"Transient X API error ({rep.status_code}) for {self.queue}: {err_msg}"
                 )
@@ -571,6 +627,8 @@ class QueueClient:
                 rep = await ctx.req(method, url, params=params, json=json)
                 setattr(rep, "__username", ctx.acc.username)
                 await self._check_rep(rep)
+                if self.queue == SEARCH_QUEUE and self._has_timeline_data(rep):
+                    await self.pool.reset_refusals(ctx.acc.username, self.queue)
 
                 ctx.req_count += 1  # count only successful
                 ctx.reset_failures()
@@ -579,19 +637,16 @@ class QueueClient:
             except NotFoundAfterSigningError as e:
                 if self.queue != SEARCH_QUEUE:
                     raise
-                if not await self._signed_control_succeeds():
-                    logger.warning(
-                        f"Search 404 for {ctx.acc.username} and the signed control read failed too: not a "
-                        f"search limit. Cooling the account for {SIGNING_FAILURE_COOLDOWN_SECONDS}s"
-                    )
-                    await self._close_ctx(utc.ts() + SIGNING_FAILURE_COOLDOWN_SECONDS)
+                if not await self._search_limit_confirmed("HTTP 404 after fresh signing"):
                     raise
                 refused += 1
                 if not await self._quarantine_refused_search("HTTP 404 after fresh signing") or (
                     refused >= TRANSIENT_API_ERROR_RETRY_LIMIT
                 ):
                     raise SearchRefusedError(f"X refused {self.queue} with HTTP 404: {e}") from e
-            except SearchRefusedError:
+            except SearchRefusedError as e:
+                if not await self._search_limit_confirmed("(-1) Internal server error"):
+                    raise ServiceUnavailableError(str(e)) from e
                 refused += 1
                 if not await self._quarantine_refused_search("(-1) Internal server error") or (
                     refused >= TRANSIENT_API_ERROR_RETRY_LIMIT

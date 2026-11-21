@@ -12,6 +12,8 @@ import httpx
 from curl_cffi.requests import AsyncSession
 from curl_cffi.requests.errors import RequestsError
 
+from .redaction import redact_credentials
+
 # Headers the browser profile sets; httpx defaults and stored account values would contradict it.
 BROWSER_PROFILE_HEADERS = {
     "user-agent",
@@ -75,6 +77,7 @@ def api_fetch_headers(request: httpx.Request) -> dict[str, str | None]:
 
 class CurlTransport(httpx.AsyncBaseTransport):
     def __init__(self, impersonate: str, proxy: str | None = None, timeout: float = 30.0):
+        self._proxy = proxy
         self._session = AsyncSession(impersonate=impersonate, proxy=proxy, timeout=timeout)  # type: ignore[arg-type]
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
@@ -94,7 +97,9 @@ class CurlTransport(httpx.AsyncBaseTransport):
                 allow_redirects=False,
             )
         except RequestsError as error:
-            raise httpx.TransportError(f"curl-cffi request failed: {error}") from error
+            # libcurl echoes the proxy URL (with its userinfo) in some errors; the original is not chained.
+            message = redact_credentials(f"curl-cffi request failed: {error}", self._proxy)
+            raise httpx.TransportError(message) from None
 
         return httpx.Response(
             rep.status_code,
