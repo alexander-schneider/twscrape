@@ -22,7 +22,7 @@ from pytest_httpx import HTTPXMock
 from twscrape.accounts_pool import AccountsPool
 from twscrape.api import API
 from twscrape.budget import AccountBudget
-from twscrape.db import fetchone
+from twscrape.db import execute, fetchone
 from twscrape.queue_client import QueueClient, ServiceUnavailableError
 from twscrape.utils import utc
 
@@ -349,3 +349,95 @@ async def test_uncapped_queues_are_not_counted(httpx_mock: HTTPXMock, tmp_path, 
     async with QueueClient(pool, "TweetDetail") as client:
         await client.get(URL)
     assert "__daily__" not in await raw_stats(pool, "user1")
+
+
+# --- warm-up ------------------------------------------------------------------------------------------------
+
+
+async def set_stat(pool: AccountsPool, username: str, key: str, value) -> None:
+    await execute(
+        pool._db_file,
+        f"UPDATE accounts SET stats = json_set(stats, '$.\"{key}\"', json(:v)) WHERE username = :u",
+        {"u": username, "v": json.dumps(value)},
+    )
+
+
+@pytest.mark.parametrize(
+    ("age_days", "expected"),
+    [(None, 0.1), (0, 0.1), (5, 0.55), (10, 1.0), (30, 1.0)],
+)
+def test_the_warm_up_fraction_ramps_from_the_start_fraction_to_one(age_days, expected):
+    now = datetime(2026, 11, 22, 12, tzinfo=timezone.utc)
+    first_used = None if age_days is None else now - timedelta(days=age_days)
+    budget = AccountBudget(warmup_days=10, warmup_start_fraction=0.1)
+    assert budget.fraction(first_used, now) == pytest.approx(expected)
+    assert AccountBudget().fraction(first_used, now) == 1.0  # warm-up off
+
+
+@pytest.mark.parametrize(
+    ("age_days", "interval", "cap"),
+    [(None, 600, 1), (5, 60 / 0.55, 5), (20, 60, 10)],
+)
+async def test_warm_up_slows_pacing_and_lowers_the_cap(
+    httpx_mock: HTTPXMock, tmp_path, monkeypatch, age_days, interval, cap
+):
+    """Day 0 (a new account): 60 s / 0.1 = 600 s and cap 10 x 0.1 = 1. Day 5 of 10: fraction 0.55. Day 20: off."""
+    pool = await make_pool(
+        tmp_path,
+        monkeypatch,
+        accounts=1,
+        TWS_ACCOUNT_PACING="SearchTimeline=60",
+        TWS_ACCOUNT_DAILY_CAPS="SearchTimeline=10",
+        TWS_WARMUP_DAYS="10",
+    )
+    monkeypatch.setattr("twscrape.budget.random.uniform", lambda low, high: 1.0)
+    paces = []
+    pace_seconds = AccountBudget.pace_seconds
+
+    def recorded_pace(self, queue, fraction=1.0):
+        paces.append(pace_seconds(self, queue, fraction))
+        return paces[-1]
+
+    monkeypatch.setattr(AccountBudget, "pace_seconds", recorded_pace)
+    if age_days is not None:
+        first_used = (utc.now() - timedelta(days=age_days)).isoformat()
+        await set_stat(pool, "user1", "__first_used__", first_used)
+    # One request short of the expected cap, so this request reaches it and locks until midnight.
+    today = utc.now().date().isoformat()
+    await set_stat(
+        pool, "user1", "__daily__", {"SearchTimeline": {"day": today, "count": cap - 1}}
+    )
+    httpx_mock.add_response(url=URL, json=SEARCH_PAGE)
+
+    async with QueueClient(pool, "SearchTimeline") as client:
+        await client.get(URL)
+
+    assert (await raw_stats(pool, "user1"))["__daily__"]["SearchTimeline"]["count"] == cap
+    assert (await pool.get("user1")).locks["SearchTimeline"] == next_utc_midnight(utc.now())
+    assert paces == [pytest.approx(interval)]
+
+
+async def test_the_first_request_stores_first_used_once(
+    httpx_mock: HTTPXMock, tmp_path, monkeypatch
+):
+    """Pacing alone also starts the warm-up clock; later requests do not move it."""
+    pool = await make_pool(
+        tmp_path,
+        monkeypatch,
+        accounts=1,
+        TWS_ACCOUNT_PACING="SearchTimeline=1",
+        TWS_WARMUP_DAYS="7",
+    )
+    for _ in range(2):
+        httpx_mock.add_response(url=URL, json=SEARCH_PAGE)
+
+    async with QueueClient(pool, "SearchTimeline") as client:
+        await client.get(URL)
+    first = (await raw_stats(pool, "user1"))["__first_used__"]
+    await pool.reset_locks()
+    async with QueueClient(pool, "SearchTimeline") as client:
+        await client.get(URL)
+
+    assert (await raw_stats(pool, "user1"))["__first_used__"] == first
+    assert abs((utc.from_iso(first) - utc.now()).total_seconds()) < 60
+    assert (await pool.get("user1")).stats == {"SearchTimeline": 2}
