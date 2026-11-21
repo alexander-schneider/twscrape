@@ -19,7 +19,8 @@ import httpx
 import pytest
 from pytest_httpx import HTTPXMock
 
-from twscrape.accounts_pool import AccountsPool
+import twscrape
+from twscrape.accounts_pool import AccountsPool, BudgetExhaustedError, NoAccountError
 from twscrape.api import API
 from twscrape.budget import AccountBudget
 from twscrape.db import execute, fetchone
@@ -441,3 +442,87 @@ async def test_the_first_request_stores_first_used_once(
     assert (await raw_stats(pool, "user1"))["__first_used__"] == first
     assert abs((utc.from_iso(first) - utc.now()).total_seconds()) < 60
     assert (await pool.get("user1")).stats == {"SearchTimeline": 2}
+
+
+# --- out of budget ------------------------------------------------------------------------------------------
+
+
+async def hold_by_cap(
+    pool: AccountsPool, username: str, count: int, day: str | None = None
+) -> None:
+    day = day or utc.now().date().isoformat()
+    await set_stat(pool, username, "__daily__", {"SearchTimeline": {"day": day, "count": count}})
+    midnight = int(next_utc_midnight(utc.now()).timestamp())
+    await pool.lock_until(username, "SearchTimeline", midnight)
+
+
+def waiting_pool(pool: AccountsPool, **kwargs) -> AccountsPool:
+    return AccountsPool(pool._db_file, raise_when_no_account=True, **kwargs)
+
+
+async def test_requests_end_with_budget_exhausted_when_every_account_used_its_cap(
+    httpx_mock: HTTPXMock, tmp_path, monkeypatch
+):
+    pool = await make_pool(tmp_path, monkeypatch, TWS_ACCOUNT_DAILY_CAPS="SearchTimeline=1")
+    for _ in range(2):
+        httpx_mock.add_response(url=URL, json=SEARCH_PAGE)
+    client = QueueClient(pool, "SearchTimeline")
+
+    async with client:
+        assert getattr(await client.get(URL), "__username") == "user1"
+        assert getattr(await client.get(URL), "__username") == "user2"
+        with pytest.raises(BudgetExhaustedError, match=r"daily cap.*SearchTimeline=1") as exc_info:
+            await client.get(URL)
+
+    assert isinstance(exc_info.value, NoAccountError)
+    assert BudgetExhaustedError is twscrape.BudgetExhaustedError
+
+
+@pytest.mark.parametrize("wait_timeout", [None, 900])
+async def test_a_capped_account_among_held_ones_makes_it_budget_exhausted(
+    tmp_path, monkeypatch, wait_timeout
+):
+    """user1 is at its cap, user2 is quarantined from search: at least one account is held by its cap."""
+    pool = await make_pool(tmp_path, monkeypatch, TWS_ACCOUNT_DAILY_CAPS="SearchTimeline=400")
+    await hold_by_cap(pool, "user1", 400)
+    await pool.lock_until("user2", "SearchTimeline", utc.ts() + 6 * 3600)
+    monkeypatch.setattr("twscrape.accounts_pool.asyncio.sleep", _no_sleep)
+
+    with pytest.raises(BudgetExhaustedError):
+        await waiting_pool(pool, wait_timeout=wait_timeout).get_for_queue_or_wait("SearchTimeline")
+
+
+@pytest.mark.parametrize(
+    "setup",
+    ["refused", "count_from_yesterday", "below_cap", "cap_unset"],
+)
+async def test_without_a_capped_account_it_stays_no_account_error(tmp_path, monkeypatch, setup):
+    caps = "" if setup == "cap_unset" else "SearchTimeline=400"
+    pool = await make_pool(tmp_path, monkeypatch, accounts=1, TWS_ACCOUNT_DAILY_CAPS=caps)
+    yesterday = (utc.now() - timedelta(days=1)).date().isoformat()
+    if setup == "count_from_yesterday":
+        await hold_by_cap(pool, "user1", 400, day=yesterday)
+    elif setup in ("below_cap", "cap_unset"):
+        await hold_by_cap(pool, "user1", 399 if setup == "below_cap" else 400)
+    else:
+        await pool.lock_until("user1", "SearchTimeline", utc.ts() + 6 * 3600)
+
+    with pytest.raises(NoAccountError) as exc_info:
+        await waiting_pool(pool, wait_timeout=900).get_for_queue_or_wait("SearchTimeline")
+    assert type(exc_info.value) is NoAccountError
+
+
+async def test_the_cap_that_holds_an_account_includes_its_warm_up(tmp_path, monkeypatch):
+    """Day 0 of a 10-day warm-up: a cap of 400 is 40, so 40 requests today hold the account."""
+    pool = await make_pool(
+        tmp_path,
+        monkeypatch,
+        accounts=1,
+        TWS_ACCOUNT_DAILY_CAPS="SearchTimeline=400",
+        TWS_WARMUP_DAYS="10",
+    )
+    await set_stat(pool, "user1", "__first_used__", utc.now().isoformat())
+    await hold_by_cap(pool, "user1", 40)
+
+    with pytest.raises(BudgetExhaustedError, match="SearchTimeline=400"):
+        await waiting_pool(pool, wait_timeout=900).get_for_queue_or_wait("SearchTimeline")
