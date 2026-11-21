@@ -9,6 +9,7 @@ from fake_useragent import UserAgent
 from httpx import HTTPStatusError
 
 from .account import Account
+from .budget import AccountBudget
 from .db import execute, fetchall, fetchone
 from .logger import logger
 from .login import LoginConfig, login
@@ -64,6 +65,8 @@ class AccountsPool:
         self._raise_when_no_account = raise_when_no_account
         self._wait_timeout = wait_timeout
         self._wait_interval = wait_interval
+        # Read once, so a malformed TWS_ACCOUNT_PACING etc. fails here, not on the first request.
+        self.budget = AccountBudget.from_env()
 
     def _usernames_where(self, usernames: list[str]) -> tuple[str, dict[str, str]]:
         placeholders = []
