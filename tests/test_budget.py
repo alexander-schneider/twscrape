@@ -7,8 +7,9 @@ Ways this can fail, covered below:
 - the daily count misses requests that failed, is not stored before the request, or does not reset at UTC
   midnight; the cap lock ends before midnight;
 - warm-up does not slow new accounts, or never ends;
-- a pool held by its caps raises the plain NoAccountError (the worker would alarm), or a pool without capped
-  accounts raises BudgetExhaustedError;
+- a pool held by its caps, wholly or in part (the rest held otherwise), raises the plain NoAccountError (the
+  worker would take it for an outage and start its paid fallback), or a pool without capped accounts raises
+  BudgetExhaustedError;
 - a save (login) or a reloaded pool loses the counts, or reset_locks lifts a cap.
 """
 
@@ -539,7 +540,7 @@ async def test_requests_end_with_budget_exhausted_when_every_account_used_its_ca
 
 
 @pytest.mark.parametrize("wait_timeout", [None, 900])
-async def test_budget_exhausted_only_when_every_active_account_is_held_by_its_cap(
+async def test_budget_exhausted_when_every_active_account_is_held_by_its_cap(
     tmp_path, monkeypatch, wait_timeout
 ):
     pool = await make_pool(
@@ -550,17 +551,18 @@ async def test_budget_exhausted_only_when_every_active_account_is_held_by_its_ca
     await pool.set_active("user3", False)  # an inactive account does not count either way
     monkeypatch.setattr("twscrape.accounts_pool.asyncio.sleep", _no_sleep)
 
-    with pytest.raises(BudgetExhaustedError, match="2 account"):
+    with pytest.raises(BudgetExhaustedError, match=r"2 of 2 active account\(s\)"):
         await waiting_pool(pool, wait_timeout=wait_timeout).get_for_queue_or_wait("SearchTimeline")
 
 
 @pytest.mark.parametrize("wait_timeout", [None, 900])
 @pytest.mark.parametrize("other", ["refused", "cooldown", "global_lock"])
-async def test_a_capped_account_among_otherwise_held_ones_is_no_account_error(
+async def test_a_capped_account_among_otherwise_held_ones_is_budget_exhausted(
     tmp_path, monkeypatch, wait_timeout, other
 ):
-    """5 accounts: X refuses 4, the 5th reached its cap. That is an outage, not capacity: the app's outage
-    breaker and fallbacks must start, so the error stays the plain NoAccountError."""
+    """5 accounts: X refuses 4, the 5th reached its cap. X does not refuse every account, so that is missing
+    capacity, not an outage: the app must not start a paid fallback for it (owner rule of api.adanos.org#3565:
+    paid search only when X blocks every active account; a daily cap never starts it)."""
     pool = await make_pool(
         tmp_path, monkeypatch, accounts=5, TWS_ACCOUNT_DAILY_CAPS="SearchTimeline=400"
     )
@@ -574,9 +576,8 @@ async def test_a_capped_account_among_otherwise_held_ones_is_no_account_error(
             await pool.lock_until(f"user{i}", GLOBAL_LOCK_QUEUE, utc.ts() + 3 * 3600)
     monkeypatch.setattr("twscrape.accounts_pool.asyncio.sleep", _no_sleep)
 
-    with pytest.raises(NoAccountError) as exc_info:
+    with pytest.raises(BudgetExhaustedError, match=r"1 of 5 active account\(s\) used their daily cap"):
         await waiting_pool(pool, wait_timeout=wait_timeout).get_for_queue_or_wait("SearchTimeline")
-    assert type(exc_info.value) is NoAccountError
 
 
 @pytest.mark.parametrize(
