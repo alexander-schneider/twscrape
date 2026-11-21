@@ -463,6 +463,14 @@ class QueueClient:
         log_msg = f"{rep.status_code:3d} - {req_id(rep)} - {err_msg}"
         logger.trace(log_msg)
 
+        # An X outage, whatever the body (JSON errors, plain text or nothing): never an account lock or a refusal.
+        if 500 <= rep.status_code < 600:
+            logger.warning(f"Transient X API error detected: {log_msg}")
+            detail = err_msg if errors else f"HTTP {rep.status_code}"
+            raise ServiceUnavailableError(
+                f"Transient X API error ({rep.status_code}) for {self.queue}: {detail}"
+            )
+
         if malformed_errors:
             logger.error(f"API malformed errors payload: {log_msg}")
             await self._close_ctx(utc.ts() + UNKNOWN_API_ERROR_COOLDOWN_SECONDS)
