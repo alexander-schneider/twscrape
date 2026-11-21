@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.23.0 - 2026-11-22
+## v0.23.0 - 2026-11-21
 
 X suspended a fresh account 48 s after a 3,000-tweet first run
 ([vladkens/twscrape#384](https://github.com/vladkens/twscrape/issues/384)) and
