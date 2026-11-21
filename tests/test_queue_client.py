@@ -976,6 +976,10 @@ async def test_search_503_with_internal_server_error_stays_transient(
         # Not decodable as UTF-8, and a rate-limit header that is not a number (review round 3 of v0.22.2).
         (503, {"content": "Serveur indisponible, réessayez".encode("latin-1")}),
         (503, {"text": "busy", "headers": {"x-rate-limit-remaining": "", "x-rate-limit-reset": "soon"}}),
+        # An "errors" field of the wrong shape (review round 4 of v0.22.3).
+        (503, {"json": {"errors": 1}}),
+        (503, {"json": {"errors": [1, None, {"message": 5}]}}),
+        (503, {"json": {"errors": "Internal server error"}}),
     ],
 )
 async def test_every_search_5xx_is_transient_whatever_the_body(
@@ -1066,3 +1070,19 @@ async def test_404_on_other_queues_still_aborts(httpx_mock: HTTPXMock, pool_mock
     async with client:
         with pytest.raises(AbortReqError):
             await client.get(URL)
+
+
+async def test_a_5xx_is_transient_also_in_debug_mode(httpx_mock: HTTPXMock, client_fixture: CF, monkeypatch):
+    """Debug mode dumps the response; an undecodable 503 must still be classified first (review round 4)."""
+    pool, client = client_fixture
+    client.debug = True
+    monkeypatch.setattr("twscrape.queue_client.asyncio.sleep", _mock_sleep)
+    monkeypatch.setenv("TWS_RAISE_WHEN_NO_ACCOUNT", "1")
+    for _ in range(3):
+        httpx_mock.add_response(url=URL, status_code=503, content="indisponible é".encode("latin-1"))
+
+    async with client:
+        with pytest.raises(ServiceUnavailableError, match="Transient X API error \\(503\\)"):
+            await client.get(URL)
+
+    assert await _search_lock_hours(pool) == {}
