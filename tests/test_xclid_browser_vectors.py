@@ -13,7 +13,7 @@ import bs4
 
 from twscrape.xclid import animation_key, parse_anim_arr, parse_vk_bytes
 
-DATA = Path(__file__).parent / "data" / "xtid_browser"
+DATA = Path(__file__).parent / "browser_capture" / "xtid"
 INDICES = [14, 20, 19, 30]
 
 

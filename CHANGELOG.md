@@ -38,7 +38,7 @@ asking X for search once it refused an account.
   browser-recorded keys diverged (at least 4.9% of random keys printed a channel
   above 255), and X answers such ids with an empty 404. Ported from
   [Lqm1/x-client-transaction-id#26](https://github.com/Lqm1/x-client-transaction-id/pull/26);
-  `tests/data/xtid_browser` holds the Apache-2.0 vectors of
+  `tests/browser_capture/xtid` holds the Apache-2.0 vectors of
   [anatolykoptev/go-twitter](https://github.com/anatolykoptev/go-twitter).
 - The signing indices are also found in X's hashed x-web build: static imports
   are followed from the page scripts (2 levels, 32 chunks) to the chunk loaded

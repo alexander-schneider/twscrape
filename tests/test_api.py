@@ -452,7 +452,7 @@ async def test_search_sends_the_web_clients_variables_and_features(api_mock: API
     variables in the same order, exactly its feature switches, no fieldToggles. A different feature set is a
     fingerprint, and a set that does not match the operation can get a 404 (Scweet 5.8.1)."""
     capture = json.loads(
-        (Path(__file__).parent / "data" / "search_timeline_browser_capture.json").read_text()
+        (Path(__file__).parent / "browser_capture" / "search_timeline.json").read_text()
     )
     sent = []
 
