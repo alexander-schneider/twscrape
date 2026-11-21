@@ -424,33 +424,34 @@ class AccountsPool:
             )
             await asyncio.sleep(interval)
 
-    async def seconds_until_available(self, queue: str) -> float | None:
-        """Seconds until the earliest lock on `queue` (or the global lock) of an active account ends."""
+    async def _earliest_unlock(self, queue: str) -> str | None:
+        """When the first locked active account is free for `queue`: per account the later of its `queue` lock and
+        its global lock (both must have ended), then the earliest across accounts."""
         qs = f"""
-        SELECT MIN(lock_entry.value) as lock_until
-        FROM accounts
-        JOIN json_each(locks) AS lock_entry
-        WHERE active = true
-            AND lock_entry.key IN ('{queue}', '{GLOBAL_LOCK_QUEUE}')
-            AND lock_entry.value IS NOT NULL
+        SELECT MIN(account_until) AS lock_until FROM (
+            SELECT MAX(lock_entry.value) AS account_until
+            FROM accounts
+            JOIN json_each(locks) AS lock_entry
+            WHERE active = true
+                AND lock_entry.key IN ('{queue}', '{GLOBAL_LOCK_QUEUE}')
+                AND lock_entry.value IS NOT NULL
+            GROUP BY accounts.username
+        )
         """
         rs = await fetchone(self._db_file, qs)
-        if not rs or not rs[0]:
+        return rs[0] if rs and rs[0] else None
+
+    async def seconds_until_available(self, queue: str) -> float | None:
+        """Seconds until the first locked active account is free for `queue` (see `_earliest_unlock`)."""
+        lock_until = await self._earliest_unlock(queue)
+        if lock_until is None:
             return None
-        return max(0.0, (utc.from_iso(rs[0]) - utc.now()).total_seconds())
+        return max(0.0, (utc.from_iso(lock_until) - utc.now()).total_seconds())
 
     async def next_available_at(self, queue: str):
-        qs = f"""
-        SELECT MIN(lock_entry.value) as lock_until
-        FROM accounts
-        JOIN json_each(locks) AS lock_entry
-        WHERE active = true
-            AND lock_entry.key IN ('{queue}', '{GLOBAL_LOCK_QUEUE}')
-            AND lock_entry.value IS NOT NULL
-        """
-        rs = await fetchone(self._db_file, qs)
-        if rs and rs[0]:
-            now, trg = utc.now(), utc.from_iso(rs[0])
+        lock_until = await self._earliest_unlock(queue)
+        if lock_until is not None:
+            now, trg = utc.now(), utc.from_iso(lock_until)
             if trg < now:
                 return "now"
 
