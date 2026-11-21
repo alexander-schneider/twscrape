@@ -198,9 +198,17 @@ class AccountsPool:
         data = account.to_rs()
         cols = list(data.keys())
 
+        # Account.stats holds only the integer request counters; keep the stored refusal streak, which the
+        # loaded Account never carries, instead of erasing it on every save (for example after a login).
+        path = f'$."{REFUSALS_STATS_KEY}"'
+        keep_streak = f"""stats=CASE
+            WHEN json_extract(accounts.stats, '{path}') IS NULL THEN excluded.stats
+            ELSE json_set(excluded.stats, '{path}', json(json_extract(accounts.stats, '{path}')))
+        END"""
+        updates = [keep_streak if x == "stats" else f"{x}=excluded.{x}" for x in cols]
         qs = f"""
         INSERT INTO accounts ({",".join(cols)}) VALUES ({",".join([f":{x}" for x in cols])})
-        ON CONFLICT(username) DO UPDATE SET {",".join([f"{x}=excluded.{x}" for x in cols])}
+        ON CONFLICT(username) DO UPDATE SET {",".join(updates)}
         """
         await execute(self._db_file, qs, data)
 
