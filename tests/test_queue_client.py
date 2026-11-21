@@ -916,6 +916,35 @@ async def test_search_503_with_internal_server_error_stays_transient(
 
 
 @pytest.mark.parametrize(
+    ("status", "body"),
+    [
+        (503, {"text": "upstream connect error or disconnect/reset before headers"}),
+        (502, {"content": b""}),
+        (503, {"json": REFUSED}),
+        (500, {"json": {"errors": [{"code": 999, "message": "Something new"}]}}),
+    ],
+)
+async def test_every_search_5xx_is_transient_whatever_the_body(
+    status, body, httpx_mock: HTTPXMock, client_fixture: CF, monkeypatch
+):
+    """A 5xx is an X outage whatever its body: no 15-minute account lock and no internal retry beyond the
+    transient path; the request raises ServiceUnavailableError and leaves every account free."""
+    pool, client = client_fixture
+    monkeypatch.setattr("twscrape.queue_client.asyncio.sleep", _mock_sleep)
+    monkeypatch.setenv("TWS_RAISE_WHEN_NO_ACCOUNT", "1")  # fail instead of waiting for an account
+    for _ in range(3):
+        httpx_mock.add_response(url=URL, status_code=status, **body)
+
+    async with client:
+        with pytest.raises(ServiceUnavailableError, match=f"Transient X API error \\({status}\\)"):
+            await client.get(URL)
+
+    assert len(httpx_mock.get_requests()) == 3
+    assert _control_requests(httpx_mock) == []
+    assert await _search_lock_hours(pool) == {}
+
+
+@pytest.mark.parametrize(
     "control",
     [
         {"data": {"user": {}}},
