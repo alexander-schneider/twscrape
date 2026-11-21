@@ -31,8 +31,14 @@ def _filter(r):
     return r["level"].no >= logger.level(_LOG_LEVEL).no
 
 
+def add_default_sink(stream=sys.stderr) -> int:
+    """The sink twscrape installs on import. No backtrace and no diagnose: loguru would print the values of a
+    traceback's local variables, proxy URLs with their credentials included."""
+    return logger.add(stream, filter=_filter, backtrace=False, diagnose=False)
+
+
 logger.remove()
-logger.add(sys.stderr, filter=_filter)
+add_default_sink()
 
 
 class LogOnce:

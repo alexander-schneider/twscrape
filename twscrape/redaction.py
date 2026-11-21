@@ -6,6 +6,7 @@ user names). So with a proxy configured, a transport error keeps only its type: 
 without the original message, cause or context, and `raise_without_context` raises it.
 """
 
+import os
 from typing import NoReturn
 
 
@@ -39,7 +40,7 @@ def proxy_safe_error(
     host:port:user:password, e-mail user names), so the message is dropped, not cleaned. The type is kept where it
     can be built from a message, so callers keep handling it the same way.
     """
-    if not proxy:
+    if not proxy_in_use(proxy):
         return None
     message = f"{PROXY_SETUP_FAILED if setup else PROXY_REQUEST_FAILED} ({type(error).__name__})"
     try:
@@ -54,3 +55,19 @@ def proxy_safe_error(
     if request is not None:
         setattr(safe, "_request", request)
     return safe
+
+
+# The proxy variables curl-cffi (and libcurl) read from the environment when no proxy is passed.
+ENV_PROXY_VARIABLES = (
+    "https_proxy",
+    "HTTPS_PROXY",
+    "http_proxy",
+    "HTTP_PROXY",
+    "all_proxy",
+    "ALL_PROXY",
+)
+
+
+def proxy_in_use(proxy: str | None) -> bool:
+    """A proxy is configured, or one the HTTP client may take from the environment."""
+    return bool(proxy) or any(os.environ.get(name) for name in ENV_PROXY_VARIABLES)
