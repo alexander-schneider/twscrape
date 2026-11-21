@@ -85,7 +85,9 @@ async def test_on_page_is_called_for_every_answer_also_a_cursor_only_one(pipelin
     if raw:
         [rep async for rep in api.search_raw("example", max_pages=3, on_page=on_page)]
     else:
-        assert [item.id async for item in api.search("example", max_pages=3, on_page=on_page)] == [941]
+        assert [item.id async for item in api.search("example", max_pages=3, on_page=on_page)] == [
+            941
+        ]
 
     assert answers == [1, 2, 3]
 
