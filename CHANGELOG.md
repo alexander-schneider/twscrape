@@ -46,8 +46,10 @@ asking X for search once it refused an account.
   `(a[N], 16)` indices to count, so an unrelated chunk with one match is not
   taken. Adapted from [vladkens/twscrape#380](https://github.com/vladkens/twscrape/pull/380).
 - Before a search 404 starts the quarantine, one signed control read
-  (UserByScreenName) checks the signature and the account. If it fails too, the
-  account only cools down for 15 minutes and the request fails as before.
+  (UserByScreenName) checks that the account still reads. If it fails too, the
+  account cools down for 30 minutes (past the 15-minute wait horizon) and the
+  request fails as before. X does not check the transaction id on this read
+  (measured 2026-11-21), so it does not detect a broken signature.
 - SearchTimeline sends the web client's variables in its order
   (`withGrokTranslatedBio` true for Top and People only,
   `withQuickPromoteEligibilityTweetFields`), exactly the feature switches the

@@ -207,7 +207,7 @@ class Ctx:
             await asyncio.sleep(1)
 
         raise NotFoundAfterSigningError(
-            "Failed to get XClIdGen. See: https://github.com/alexander-schneider/twscrape/issues"
+            f"HTTP 404 for {path} after {tries} fresh x-client-transaction-ids"
         )
 
 
@@ -339,8 +339,10 @@ class QueueClient:
     async def _signed_control_succeeds(self) -> bool:
         """One signed GraphQL read that search-limited accounts still get (UserByScreenName).
 
-        An empty 404 on search also comes from a broken x-client-transaction-id or an account suspended
-        everywhere (vladkens/twscrape#368, #384); only a working control read makes the 404 a search limit.
+        A search-limited account still reads; an account whose every read fails is not search-limited, so it
+        gets no 6-hour search quarantine. Measured live on 2026-11-21: X answered UserByScreenName, TweetDetail
+        and UserTweets with 200 also for a random or missing x-client-transaction-id, so this read does not
+        detect a broken signature; tests/test_xclid_browser_vectors.py guards the signature instead.
         """
         from .api import GQL_FEATURES, GQL_URL, OP_UserByScreenName, USER_BY_SCREEN_NAME_FEATURES
         from .utils import encode_params
