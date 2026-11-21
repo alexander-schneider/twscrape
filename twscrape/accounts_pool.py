@@ -481,7 +481,10 @@ class AccountsPool:
             if give_up:
                 if raise_no_account:
                     capped = await self.accounts_held_by_cap(queue)
-                    if capped:
+                    active = await self._active_usernames()
+                    # Only a pool held entirely by its caps is out of capacity; one account held by anything
+                    # else (refusal, cooldown, rate limit) may be an outage the caller must see as such.
+                    if capped and set(capped) >= active:
                         cap = self.budget.daily_caps[queue]
                         raise BudgetExhaustedError(
                             f"No account available for queue {queue}: {len(capped)} account(s) used "
@@ -503,6 +506,10 @@ class AccountsPool:
                 self._wait_interval if remaining is None else min(self._wait_interval, remaining)
             )
             await asyncio.sleep(interval)
+
+    async def _active_usernames(self) -> set[str]:
+        rs = await fetchall(self._db_file, "SELECT username FROM accounts WHERE active = true")
+        return {row["username"] for row in rs}
 
     async def accounts_held_by_cap(self, queue: str) -> list[str]:
         """Active accounts whose count today (UTC) has reached their cap on `queue`, warm-up included."""
