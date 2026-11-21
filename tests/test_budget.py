@@ -12,6 +12,9 @@ Ways this can fail, covered below:
 - a save (login) or a reloaded pool loses the counts, or reset_locks lifts a cap.
 """
 
+import json
+from datetime import datetime, timedelta, timezone
+
 import httpx
 import pytest
 from pytest_httpx import HTTPXMock
@@ -19,6 +22,7 @@ from pytest_httpx import HTTPXMock
 from twscrape.accounts_pool import AccountsPool
 from twscrape.api import API
 from twscrape.budget import AccountBudget
+from twscrape.db import fetchone
 from twscrape.queue_client import QueueClient, ServiceUnavailableError
 from twscrape.utils import utc
 
@@ -112,6 +116,7 @@ async def make_pool(tmp_path, monkeypatch, accounts=2, **env) -> AccountsPool:
     for name, value in env.items():
         monkeypatch.setenv(name, value)
     monkeypatch.setattr("twscrape.queue_client.asyncio.sleep", _no_sleep)
+    monkeypatch.setenv("TWS_RAISE_WHEN_NO_ACCOUNT", "1")  # fail instead of waiting for an account
     pool = AccountsPool(str(tmp_path / "accounts.db"))
     for i in range(1, accounts + 1):
         await pool.add_account(f"user{i}", "_", "_", "_", cookies=f"auth_token=t{i}; ct0=csrf{i}")
@@ -239,3 +244,108 @@ async def test_requests_wait_for_a_paced_account_instead_of_giving_up(tmp_path, 
 
     account = await waiting.get_for_queue_or_wait("SearchTimeline")
     assert account is not None and account.username == "user2" and slept
+
+
+# --- daily caps ---------------------------------------------------------------------------------------------
+
+
+async def raw_stats(pool: AccountsPool, username: str) -> dict:
+    rs = await fetchone(
+        pool._db_file, "SELECT stats FROM accounts WHERE username = :u", {"u": username}
+    )
+    assert rs is not None
+    return json.loads(rs[0])
+
+
+def next_utc_midnight(now: datetime) -> datetime:
+    return datetime.combine(now.date() + timedelta(days=1), datetime.min.time(), timezone.utc)
+
+
+def requested_by(httpx_mock: HTTPXMock) -> list[str]:
+    return [r.headers["x-csrf-token"].removeprefix("csrf") for r in httpx_mock.get_requests()]
+
+
+async def test_the_cap_locks_the_account_until_the_next_utc_midnight(
+    httpx_mock: HTTPXMock, tmp_path, monkeypatch
+):
+    pool = await make_pool(tmp_path, monkeypatch, TWS_ACCOUNT_DAILY_CAPS="SearchTimeline=2")
+    for _ in range(3):
+        httpx_mock.add_response(url=URL, json=SEARCH_PAGE)
+    client = QueueClient(pool, "SearchTimeline")
+
+    async with client:
+        users = [getattr(await client.get(URL), "__username") for _ in range(3)]
+
+    assert users == ["user1", "user1", "user2"]
+    today = utc.now().date().isoformat()
+    assert (await raw_stats(pool, "user1"))["__daily__"] == {
+        "SearchTimeline": {"day": today, "count": 2}
+    }
+    assert (await pool.get("user1")).locks["SearchTimeline"] == next_utc_midnight(utc.now())
+    assert (await raw_stats(pool, "user2"))["__daily__"]["SearchTimeline"]["count"] == 1
+    assert "SearchTimeline" not in (await pool.get("user2")).locks
+
+
+async def test_every_request_sent_is_counted_before_it_is_sent(
+    httpx_mock: HTTPXMock, tmp_path, monkeypatch
+):
+    """X counts requests, not successes: a failed attempt counts, and the count is stored before sending."""
+    pool = await make_pool(
+        tmp_path, monkeypatch, accounts=1, TWS_ACCOUNT_DAILY_CAPS="SearchTimeline=10"
+    )
+    seen_counts = []
+
+    async def record_stored_count(request: httpx.Request) -> httpx.Response:
+        stats = await raw_stats(pool, "user1")
+        seen_counts.append(stats["__daily__"]["SearchTimeline"]["count"])
+        if len(seen_counts) == 1:
+            raise httpx.ReadTimeout("slow", request=request)
+        return httpx.Response(200, json=SEARCH_PAGE)
+
+    httpx_mock.add_callback(record_stored_count, url=URL, is_reusable=True)
+    client = QueueClient(pool, "SearchTimeline")
+
+    async with client:
+        await client.get(URL)
+
+    assert seen_counts == [1, 2]
+    assert (await raw_stats(pool, "user1"))["__daily__"]["SearchTimeline"]["count"] == 2
+
+
+async def test_reset_locks_does_not_lift_a_cap_but_the_next_utc_day_does(
+    httpx_mock: HTTPXMock, tmp_path, monkeypatch
+):
+    pool = await make_pool(tmp_path, monkeypatch, TWS_ACCOUNT_DAILY_CAPS="SearchTimeline=1")
+    for _ in range(3):
+        httpx_mock.add_response(url=URL, json=SEARCH_PAGE)
+    client = QueueClient(pool, "SearchTimeline")
+
+    async with client:
+        assert getattr(await client.get(URL), "__username") == "user1"
+    await pool.reset_locks()
+    # Same day: user1 is still at its cap, so it sends nothing and goes back to its midnight lock.
+    async with client:
+        assert getattr(await client.get(URL), "__username") == "user2"
+    assert requested_by(httpx_mock) == ["1", "2"]
+    assert (await pool.get("user1")).locks["SearchTimeline"] == next_utc_midnight(utc.now())
+    assert (await raw_stats(pool, "user1"))["__daily__"]["SearchTimeline"]["count"] == 1
+
+    tomorrow = utc.now() + timedelta(days=1)
+    monkeypatch.setattr(utc, "now", staticmethod(lambda: tomorrow))
+    await pool.reset_locks()
+    async with client:
+        assert getattr(await client.get(URL), "__username") == "user1"
+    assert (await raw_stats(pool, "user1"))["__daily__"]["SearchTimeline"] == {
+        "day": tomorrow.date().isoformat(),
+        "count": 1,
+    }
+
+
+async def test_uncapped_queues_are_not_counted(httpx_mock: HTTPXMock, tmp_path, monkeypatch):
+    pool = await make_pool(
+        tmp_path, monkeypatch, accounts=1, TWS_ACCOUNT_DAILY_CAPS="SearchTimeline=5"
+    )
+    httpx_mock.add_response(url=URL, json={"data": {"x": 1}})
+    async with QueueClient(pool, "TweetDetail") as client:
+        await client.get(URL)
+    assert "__daily__" not in await raw_stats(pool, "user1")
