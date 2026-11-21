@@ -33,6 +33,9 @@ GLOBAL_LOCK_QUEUE = "__global__"
 # Matches the placeholder lock `_get_and_lock` puts on an account in use; such an account comes back when its
 # request ends, so only a lock beyond this horizon (plus a minute of slack) means no account is coming.
 IN_USE_LOCK_SECONDS = 15 * 60
+# Consecutive refusals per queue, stored in the stats JSON as {"__search_refusals__": {"SearchTimeline": 2}}.
+# The value is an object, so Account.from_rs (integer counters only) and the request counters skip it.
+REFUSALS_STATS_KEY = "__search_refusals__"
 
 
 def has_required_cookies(cookies: dict[str, str]) -> bool:
@@ -299,6 +302,30 @@ class AccountsPool:
             stats = json_set(stats, '$.{queue}', COALESCE(json_extract(stats, '$.{queue}'), 0) + {req_count}),
             last_used = datetime({utc.ts()}, 'unixepoch')
         WHERE username = :username
+        """
+        await execute(self._db_file, qs, {"username": username})
+
+    async def record_refusal(self, username: str, queue: str) -> int:
+        """Counts one more consecutive refusal of `queue` for the account and returns the new count."""
+        path = f'$."{REFUSALS_STATS_KEY}"."{queue}"'
+        qs = f"""
+        UPDATE accounts SET stats = json_set(stats, '{path}', COALESCE(json_extract(stats, '{path}'), 0) + 1)
+        WHERE username = :username
+        """
+        await execute(self._db_file, qs, {"username": username})
+        rs = await fetchone(
+            self._db_file,
+            f"SELECT json_extract(stats, '{path}') FROM accounts WHERE username = :username",
+            {"username": username},
+        )
+        return int(rs[0]) if rs and rs[0] else 1
+
+    async def reset_refusals(self, username: str, queue: str) -> None:
+        """Ends the account's refusal streak on `queue`; writes nothing when there is none."""
+        path = f'$."{REFUSALS_STATS_KEY}"."{queue}"'
+        qs = f"""
+        UPDATE accounts SET stats = json_remove(stats, '{path}')
+        WHERE username = :username AND json_extract(stats, '{path}') IS NOT NULL
         """
         await execute(self._db_file, qs, {"username": username})
 

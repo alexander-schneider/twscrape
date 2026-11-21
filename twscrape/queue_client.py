@@ -28,18 +28,29 @@ CONTROL_SCREEN_NAME = "X"
 # A search 404 with a failing control read (bad signature, account out everywhere). Longer than the 15-minute
 # in-use horizon of AccountsPool.get_for_queue_or_wait, so other searches give up at once instead of waiting.
 SIGNING_FAILURE_COOLDOWN_SECONDS = 30 * 60
+DEFAULT_SEARCH_REFUSAL_FIRST_LOCK_SECONDS = 30 * 60
 DEFAULT_SEARCH_REFUSAL_LOCK_SECONDS = 6 * 60 * 60
 
 
-def search_refusal_lock_seconds() -> int:
-    """How long an account X refused search for stays out of search (TWS_SEARCH_REFUSAL_LOCK_SECONDS)."""
+def _env_seconds(name: str, default: int) -> int:
     try:
-        return max(
-            60,
-            int(os.getenv("TWS_SEARCH_REFUSAL_LOCK_SECONDS", DEFAULT_SEARCH_REFUSAL_LOCK_SECONDS)),
-        )
+        return max(60, int(os.getenv(name, default)))
     except ValueError:
-        return DEFAULT_SEARCH_REFUSAL_LOCK_SECONDS
+        return default
+
+
+def search_refusal_lock_seconds(refusals: int = 1) -> int:
+    """How long an account X refused search for stays out of search after its `refusals`-th consecutive refusal.
+
+    TWS_SEARCH_REFUSAL_FIRST_LOCK_SECONDS (default 30 minutes) for the first refusal, doubled for each further
+    one, capped at TWS_SEARCH_REFUSAL_LOCK_SECONDS (default 6 hours): 30 min, 1 h, 2 h, 4 h, 6 h, 6 h...
+    """
+    cap = _env_seconds("TWS_SEARCH_REFUSAL_LOCK_SECONDS", DEFAULT_SEARCH_REFUSAL_LOCK_SECONDS)
+    first = _env_seconds(
+        "TWS_SEARCH_REFUSAL_FIRST_LOCK_SECONDS", DEFAULT_SEARCH_REFUSAL_FIRST_LOCK_SECONDS
+    )
+    doublings = min(max(refusals, 1) - 1, 32)  # 2**32 times a minute is past any cap
+    return min(first * 2**doublings, cap)
 
 
 class HandledError(Exception): ...
@@ -336,11 +347,16 @@ class QueueClient:
         return True
 
     async def _quarantine_refused_search(self, reason: str) -> bool:
-        """Keep the refused account out of search for hours and continue with a free account, if any."""
-        lock_seconds = search_refusal_lock_seconds()
-        username = self.ctx.acc.username if self.ctx else "<unknown>"
+        """Keep the refused account out of search, longer for each consecutive refusal, and continue with a free
+        account, if any."""
+        if self.ctx is None:
+            return False
+        username = self.ctx.acc.username
+        refusals = await self.pool.record_refusal(username, self.queue)
+        lock_seconds = search_refusal_lock_seconds(refusals)
         logger.warning(
-            f"Search refused for {username} ({reason}); no searches with it for {lock_seconds}s"
+            f"Search refused for {username} ({reason}, {refusals} in a row); "
+            f"no searches with it for {lock_seconds}s"
         )
         await self._close_ctx(utc.ts() + lock_seconds)
         acc = await self.pool.get_for_queue(self.queue)
@@ -353,7 +369,7 @@ class QueueClient:
         """One signed GraphQL read that search-limited accounts still get (UserByScreenName).
 
         A search-limited account still reads; an account whose every read fails is not search-limited, so it
-        gets no 6-hour search quarantine. Measured live on 2026-11-21: X answered UserByScreenName, TweetDetail
+        gets no search quarantine. Measured live on 2026-11-21: X answered UserByScreenName, TweetDetail
         and UserTweets with 200 also for a random or missing x-client-transaction-id, so this read does not
         detect a broken signature; tests/test_xclid_browser_vectors.py guards the signature instead.
         """
@@ -393,6 +409,13 @@ class QueueClient:
         )
         await self._close_ctx(utc.ts() + SIGNING_FAILURE_COOLDOWN_SECONDS)
         return False
+
+    @staticmethod
+    def _has_timeline_data(rep: Response) -> bool:
+        try:
+            return has_data(rep, rep.json())
+        except ValueError:
+            return False
 
     @staticmethod
     def _is_search_refusal(err_msg: str) -> bool:
@@ -604,6 +627,8 @@ class QueueClient:
                 rep = await ctx.req(method, url, params=params, json=json)
                 setattr(rep, "__username", ctx.acc.username)
                 await self._check_rep(rep)
+                if self.queue == SEARCH_QUEUE and self._has_timeline_data(rep):
+                    await self.pool.reset_refusals(ctx.acc.username, self.queue)
 
                 ctx.req_count += 1  # count only successful
                 ctx.reset_failures()
