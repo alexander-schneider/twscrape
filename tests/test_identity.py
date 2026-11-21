@@ -296,6 +296,12 @@ UNPARSEABLE_PROXIES = [
         "http://fakeproxyuser:pw1x:secr3t@w0rdz@127.0.0.1:9",
         ["fakeproxyuser", "pw1x", "secr3t", "w0rdz"],
     ),
+    # A full-width colon becomes ":" under NFKC: urlsplit() refuses the netloc with a ValueError that quotes it,
+    # credentials included (review round 3 of v0.22.2).
+    (
+        "http://fakeproxyuser:fakepa\uff1assword@127.0.0.1:9",
+        ["fakeproxyuser", "fakepa", "ssword"],
+    ),
 ]
 
 
