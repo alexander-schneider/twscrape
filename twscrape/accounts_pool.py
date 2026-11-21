@@ -10,7 +10,7 @@ from httpx import HTTPStatusError
 
 from .account import Account
 from .budget import DAILY_STATS_KEY, FIRST_USED_STATS_KEY, AccountBudget, utc_day
-from .db import execute, fetchall, fetchone
+from .db import execute, execute_then_fetchone, fetchall, fetchone
 from .logger import logger
 from .login import LoginConfig, login
 from .utils import get_env_bool, parse_cookies, utc
@@ -373,25 +373,25 @@ class AccountsPool:
         path = f'$."{DAILY_STATS_KEY}"."{queue}"'
         same_day = f"json_extract(stats, '{path}.day') = :day"
         count = f"COALESCE(json_extract(stats, '{path}.count'), 0)"
-        tx = uuid.uuid4().hex
         qs = f"""
         UPDATE accounts SET
             stats = json_set(
                 stats, '{path}',
                 json_object('day', :day, 'count', CASE WHEN {same_day} THEN {count} + 1 ELSE 1 END)
-            ),
-            _tx = :tx
+            )
         WHERE username = :username
             AND (:cap IS NULL OR json_extract(stats, '{path}.day') IS NOT :day OR {count} < :cap)
         """
-        params = {"username": username, "day": utc_day(utc.now()), "cap": cap, "tx": tx}
-        await execute(self._db_file, qs, params)
-        rs = await fetchone(
-            self._db_file,
-            f"SELECT json_extract(stats, '{path}.count') FROM accounts WHERE _tx = :tx",
-            {"tx": tx},
-        )
-        return int(rs[0]) if rs and rs[0] is not None else None
+        # Read in the same transaction: changes() says whether this call counted, and the count is its own
+        # (a shared row marker let a concurrent call overwrite the first call's result).
+        read = f"""
+        SELECT changes(), json_extract(stats, '{path}.count') FROM accounts WHERE username = :username
+        """
+        params = {"username": username, "day": utc_day(utc.now()), "cap": cap}
+        rs = await execute_then_fetchone(self._db_file, qs, read, params)
+        if not rs or rs[0] != 1 or rs[1] is None:
+            return None
+        return int(rs[1])
 
     async def reset_refusals(self, username: str, queue: str) -> None:
         """Ends the account's refusal streak on `queue`; writes nothing when there is none."""
