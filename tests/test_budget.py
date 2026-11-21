@@ -12,6 +12,7 @@ Ways this can fail, covered below:
 - a save (login) or a reloaded pool loses the counts, or reset_locks lifts a cap.
 """
 
+import asyncio
 import json
 import re
 from datetime import datetime, timedelta, timezone
@@ -769,3 +770,27 @@ async def test_a_paced_search_signs_once_and_a_404_still_takes_the_refusal_path(
     ]
     assert sent == [("api", "csrf1"), ("UserByScreenName", "csrf1"), ("api", "csrf2")]
     assert 1800 - 5 <= await lock_seconds(pool, "user1") <= 1800  # first refusal: 30 minutes
+
+
+# --- concurrent reservations --------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("cap", [None, 10, 3])
+async def test_concurrent_reservations_on_one_account_each_get_their_own_result(
+    tmp_path, monkeypatch, cap
+):
+    """Review round 1 (P2): two concurrent reservations stored two counts but returned [None, 1], because the
+    second UPDATE overwrote the row's shared _tx marker before the first SELECT read it."""
+    pool = await make_pool(tmp_path, monkeypatch, accounts=1)
+    # db's module-wide asyncio.Lock binds to the first event loop that waits on it; give this loop its own.
+    monkeypatch.setattr("twscrape.db._lock", asyncio.Lock())
+    results = await asyncio.gather(
+        *(pool.count_request("user1", "SearchTimeline", cap) for _ in range(5))
+    )
+
+    stored = (await raw_stats(pool, "user1"))["__daily__"]["SearchTimeline"]["count"]
+    granted = sorted(r for r in results if r is not None)
+    if cap is None or cap >= 5:
+        assert granted == [1, 2, 3, 4, 5] and stored == 5
+    else:
+        assert granted == [1, 2, 3] and results.count(None) == 2 and stored == 3
