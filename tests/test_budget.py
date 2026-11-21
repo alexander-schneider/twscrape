@@ -582,3 +582,35 @@ async def test_reset_locks_keeps_daily_counts_and_first_used(tmp_path, monkeypat
     assert stats["__daily__"] == {"SearchTimeline": {"day": "2026-11-22", "count": 9}}
     assert "__search_refusals__" not in stats
     assert (await pool.get("user1")).locks == {}
+
+
+# --- twscrape accounts --------------------------------------------------------------------------------------
+
+
+async def test_accounts_info_shows_the_effective_budget_and_todays_count(tmp_path, monkeypatch):
+    """Day 0 of a 10-day warm-up: 60 s becomes 600 s and a cap of 400 becomes 40; user2 counted yesterday."""
+    pool = await make_pool(
+        tmp_path,
+        monkeypatch,
+        TWS_ACCOUNT_PACING="SearchTimeline=60,UserTweets=15",
+        TWS_ACCOUNT_DAILY_CAPS="SearchTimeline=400",
+        TWS_WARMUP_DAYS="10",
+    )
+    await set_stat(pool, "user1", "__first_used__", utc.now().isoformat())
+    today = utc.now().date().isoformat()
+    await set_stat(pool, "user1", "__daily__", {"SearchTimeline": {"day": today, "count": 12}})
+    await set_stat(
+        pool, "user2", "__daily__", {"SearchTimeline": {"day": "2000-01-01", "count": 99}}
+    )
+    await set_stat(pool, "user2", "__first_used__", "2000-01-01T00:00:00+00:00")
+
+    info = {item["username"]: item for item in await pool.accounts_info()}
+
+    assert info["user1"]["budget"] == "SearchTimeline 12/40 every 600s; UserTweets every 150s"
+    assert info["user2"]["budget"] == "SearchTimeline 0/400 every 60s; UserTweets every 15s"
+
+
+async def test_without_a_budget_accounts_info_is_unchanged(tmp_path, monkeypatch):
+    pool = await make_pool(tmp_path, monkeypatch, accounts=1)
+    (item,) = await pool.accounts_info()
+    assert "budget" not in item
