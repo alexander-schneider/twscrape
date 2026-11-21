@@ -25,7 +25,7 @@ class BudgetExhaustedError(NoAccountError):
     capacity for today, not refused by X."""
 
 
-class AccountInfo(TypedDict):
+class _AccountInfoBase(TypedDict):
     username: str
     logged_in: bool
     login_method: str
@@ -33,6 +33,10 @@ class AccountInfo(TypedDict):
     last_used: datetime | None
     total_req: int
     error_msg: str | None
+
+
+class AccountInfo(_AccountInfoBase, total=False):
+    budget: str  # only with TWS_ACCOUNT_PACING or TWS_ACCOUNT_DAILY_CAPS set
 
 
 GLOBAL_LOCK_QUEUE = "__global__"
@@ -609,6 +613,14 @@ class AccountsPool:
 
     async def accounts_info(self):
         accounts = await self.get_all()
+        budgets: dict[str, str] = {}
+        if self.budget.pacing or self.budget.daily_caps:
+            now = utc.now()
+            rs = await fetchall(self._db_file, "SELECT username, stats FROM accounts")
+            budgets = {
+                row["username"]: self.budget.describe(json.loads(row["stats"] or "{}"), now)
+                for row in rs
+            }
 
         items: list[AccountInfo] = []
         for x in accounts:
@@ -621,6 +633,8 @@ class AccountsPool:
                 "total_req": sum(x.stats.values()),
                 "error_msg": str(x.error_msg)[0:60],
             }
+            if x.username in budgets:
+                item["budget"] = budgets[x.username]
             items.append(item)
 
         old_time = datetime(1970, 1, 1).replace(tzinfo=timezone.utc)

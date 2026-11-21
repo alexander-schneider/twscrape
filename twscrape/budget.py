@@ -18,6 +18,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
+from .utils import utc
+
 PACING_ENV = "TWS_ACCOUNT_PACING"
 DAILY_CAPS_ENV = "TWS_ACCOUNT_DAILY_CAPS"
 WARMUP_DAYS_ENV = "TWS_WARMUP_DAYS"
@@ -124,6 +126,32 @@ class AccountBudget:
         if cap is None:
             return None
         return max(1, math.floor(cap * fraction))
+
+    def describe(self, stats: dict, now: datetime) -> str:
+        """One account's effective budget for `twscrape accounts`, e.g. "SearchTimeline 12/40 every 600s"."""
+        first_used = stats.get(FIRST_USED_STATS_KEY)
+        fraction = self.fraction(
+            utc.from_iso(first_used) if isinstance(first_used, str) else None, now
+        )
+        daily = stats.get(DAILY_STATS_KEY)
+        daily = daily if isinstance(daily, dict) else {}
+        parts = []
+        for queue in sorted({*self.pacing, *self.daily_caps}):
+            part = queue
+            cap = self.cap_for(queue, fraction)
+            if cap is not None:
+                today = daily.get(queue)
+                count = (
+                    today.get("count", 0)
+                    if isinstance(today, dict) and today.get("day") == utc_day(now)
+                    else 0
+                )
+                part += f" {count}/{cap}"
+            interval = self.pacing.get(queue)
+            if interval is not None:
+                part += f" every {interval / fraction:.0f}s"
+            parts.append(part)
+        return "; ".join(parts)
 
     def pace_seconds(self, queue: str, fraction: float = 1.0) -> float | None:
         """How long the account stays off `queue` after a request: the interval, divided by the warm-up
