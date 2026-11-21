@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.23.1 - 2026-11-21
+
+- A cancellation while an account's HTTP client closes (for example a caller's deadline around a paced search)
+  no longer leaves the 15-minute in-use lock on the account: the lease (release, pace floor, cap or caller's
+  lock) is written first and shielded, then the transport closes.
+
 ## v0.23.0 - 2026-11-21
 
 X suspended a fresh account 48 s after a 3,000-tweet first run
