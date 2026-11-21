@@ -32,16 +32,38 @@ def redact_credentials(text: str, proxy: str | None = None) -> str:
     return text
 
 
+def _chain(error: BaseException) -> list[BaseException]:
+    """The error and everything chained to it: __cause__, __context__ and exception group members."""
+    found: list[BaseException] = []
+    pending = [error]
+    while pending:
+        current = pending.pop()
+        if any(current is seen for seen in found):
+            continue
+        found.append(current)
+        pending += [e for e in (current.__cause__, current.__context__) if e is not None]
+        pending += list(getattr(current, "exceptions", ()))
+    return found
+
+
+def _carries_credentials(error: BaseException, proxy: str | None) -> bool:
+    return any(
+        redact_credentials(text, proxy) != text
+        for item in _chain(error)
+        for text in (str(item), repr(item))
+    )
+
+
 def redacted_error(error: BaseException, proxy: str | None) -> BaseException | None:
-    """A copy of `error` without credentials, or None when its text carries none.
+    """A copy of `error` without credentials, or None when neither it nor its chain carries any.
 
     The copy keeps the exception type where it can be built from a message, so callers keep handling it the same
-    way; the original is not chained, because it still carries the credentials.
+    way. It has no __cause__ or __context__, because the originals still carry the credentials; the caller must
+    raise it outside an except block, or Python sets __context__ again.
     """
-    text = str(error)
-    clean = redact_credentials(text, proxy)
-    if clean == text and redact_credentials(repr(error), proxy) == repr(error):
+    if not _carries_credentials(error, proxy):
         return None
+    clean = redact_credentials(str(error), proxy)
     try:
         copy = type(error)(clean)
     except Exception:

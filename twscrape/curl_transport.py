@@ -97,20 +97,21 @@ class CurlTransport(httpx.AsyncBaseTransport):
                 allow_redirects=False,
             )
         except RequestsError as error:
-            # libcurl echoes the proxy URL (with its userinfo) in some errors; the original is not chained.
+            # libcurl echoes the proxy URL (with its userinfo) in some errors.
             message = redact_credentials(f"curl-cffi request failed: {error}", self._proxy)
-            raise httpx.TransportError(message) from None
-
-        return httpx.Response(
-            rep.status_code,
-            headers=[
-                (key, value)
-                for key, value in rep.headers.multi_items()
-                if value is not None and key.lower() not in DECODED_RESPONSE_HEADERS
-            ],
-            content=rep.content,
-            request=request,
-        )
+        else:
+            return httpx.Response(
+                rep.status_code,
+                headers=[
+                    (key, value)
+                    for key, value in rep.headers.multi_items()
+                    if value is not None and key.lower() not in DECODED_RESPONSE_HEADERS
+                ],
+                content=rep.content,
+                request=request,
+            )
+        # Raised outside the except block: __context__ would otherwise keep the original libcurl error.
+        raise httpx.TransportError(message)
 
     async def aclose(self) -> None:
         await self._session.close()
