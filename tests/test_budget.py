@@ -795,3 +795,39 @@ async def test_concurrent_reservations_on_one_account_each_get_their_own_result(
         assert granted == [1, 2, 3, 4, 5] and stored == 5
     else:
         assert granted == [1, 2, 3] and results.count(None) == 2 and stored == 3
+
+
+@pytest.mark.parametrize("paced", [False, True])
+async def test_a_cancellation_while_the_transport_closes_still_ends_the_lease(
+    httpx_mock: HTTPXMock, tmp_path, monkeypatch, paced
+):
+    """api.adanos.org#3565 council round 4: a caller's deadline cancelled the task while the account's HTTP client
+    closed. The context was already cleared, so the in-use lease (15 minutes) stayed instead of the pace floor or
+    the release. Unpaced, the context closes on exit; paced, after each send."""
+    env = {"TWS_ACCOUNT_PACING": "SearchTimeline=60"} if paced else {}
+    pool = await make_pool(tmp_path, monkeypatch, accounts=1, **env)
+    httpx_mock.add_response(url=URL, json=SEARCH_PAGE)
+    closing = asyncio.Event()
+
+    async def hanging_close(self):
+        closing.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr("twscrape.queue_client.Ctx.aclose", hanging_close)
+    client = QueueClient(pool, "SearchTimeline")
+
+    async def run():
+        async with client:
+            await client.get(URL)
+
+    task = asyncio.create_task(run())
+    await asyncio.wait_for(closing.wait(), timeout=5)
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+    await asyncio.sleep(0)  # let a shielded finalization finish
+
+    seconds = await lock_seconds(pool, "user1")
+    if paced:
+        assert 58 <= seconds <= 85  # the pace floor, not the in-use lease
+    else:
+        assert seconds <= 1  # released

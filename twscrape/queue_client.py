@@ -420,9 +420,15 @@ class QueueClient:
             return
 
         ctx, self.ctx, self.req_count = self.ctx, None, 0
-        username = ctx.acc.username
-        await ctx.aclose()
+        # The lease ends first and shielded: a cancellation here or while the transport closes (a caller's deadline)
+        # must not leave the 15-minute in-use lock (api.adanos.org#3565).
+        try:
+            await asyncio.shield(self._end_lease(ctx, reset_at, inactive, msg, global_lock))
+        finally:
+            await ctx.aclose()
 
+    async def _end_lease(self, ctx: "Ctx", reset_at: int, inactive: bool, msg: str | None, global_lock: bool):
+        username = ctx.acc.username
         if inactive:
             await self.pool.mark_inactive(username, msg, queue=self.queue, req_count=ctx.req_count)
             return
