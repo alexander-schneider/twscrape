@@ -773,7 +773,8 @@ async def test_search_404_with_a_failing_control_read_is_not_a_search_limit(
     httpx_mock: HTTPXMock, client_fixture: CF, monkeypatch
 ):
     """A broken signature or an account suspended everywhere also gets empty 404s. When the signed control read
-    fails too, the account only cools down briefly; no 6-hour search quarantine for a signing bug."""
+    fails too, the account cools down for 30 minutes (past the 15-minute wait horizon, so other searches give up
+    at once); no 6-hour search quarantine for a signing bug."""
     pool, client = client_fixture
     monkeypatch.setattr("twscrape.queue_client.asyncio.sleep", _mock_sleep)
     await client.__aenter__()
@@ -786,7 +787,7 @@ async def test_search_404_with_a_failing_control_read_is_not_a_search_limit(
         await client.get(URL)
 
     assert [r.headers["x-csrf-token"] for r in httpx_mock.get_requests()] == ["csrf1"] * 4
-    assert (await _search_lock_hours(pool))["user1"] == 0.2
+    assert (await _search_lock_hours(pool))["user1"] == 0.5
 
 
 async def test_search_refusal_lock_is_configurable(

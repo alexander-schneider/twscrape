@@ -25,6 +25,9 @@ UNKNOWN_API_ERROR_COOLDOWN_SECONDS = 60 * 15
 SEARCH_QUEUE = "SearchTimeline"
 # A public account read for the signed control request before a search quarantine.
 CONTROL_SCREEN_NAME = "X"
+# A search 404 with a failing control read (bad signature, account out everywhere). Longer than the 15-minute
+# in-use horizon of AccountsPool.get_for_queue_or_wait, so other searches give up at once instead of waiting.
+SIGNING_FAILURE_COOLDOWN_SECONDS = 30 * 60
 DEFAULT_SEARCH_REFUSAL_LOCK_SECONDS = 6 * 60 * 60
 
 
@@ -577,9 +580,9 @@ class QueueClient:
                 if not await self._signed_control_succeeds():
                     logger.warning(
                         f"Search 404 for {ctx.acc.username} and the signed control read failed too: not a "
-                        f"search limit. Cooling the account for {UNKNOWN_API_ERROR_COOLDOWN_SECONDS}s"
+                        f"search limit. Cooling the account for {SIGNING_FAILURE_COOLDOWN_SECONDS}s"
                     )
-                    await self._close_ctx(utc.ts() + UNKNOWN_API_ERROR_COOLDOWN_SECONDS)
+                    await self._close_ctx(utc.ts() + SIGNING_FAILURE_COOLDOWN_SECONDS)
                     raise
                 refused += 1
                 if not await self._quarantine_refused_search("HTTP 404 after fresh signing") or (
