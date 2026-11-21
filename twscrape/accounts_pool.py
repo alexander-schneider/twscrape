@@ -286,7 +286,12 @@ class AccountsPool:
         await self.relogin([x["username"] for x in rs])
 
     async def reset_locks(self):
-        qs = "UPDATE accounts SET locks = json_object()"
+        """Lift every lock and end every refusal streak, so a returned account starts at the first step."""
+        qs = f"""
+        UPDATE accounts SET
+            locks = json_object(),
+            stats = json_remove(stats, '$."{REFUSALS_STATS_KEY}"')
+        """
         await execute(self._db_file, qs)
 
     async def set_active(self, username: str, active: bool):
