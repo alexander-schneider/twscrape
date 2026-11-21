@@ -4,7 +4,7 @@ import pytest
 
 from tests.http_replay import CONTROL_OK, page, tweet
 from twscrape import ServiceUnavailableError
-from twscrape.queue_client import DEFAULT_SEARCH_REFUSAL_LOCK_SECONDS, SearchRefusedError
+from twscrape.queue_client import SearchRefusedError
 from twscrape.utils import utc
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -23,11 +23,13 @@ def nested_search_error(empty):
     }
 
 
+# The first refusal of an account locks its search for 30 minutes (TWS_SEARCH_REFUSAL_FIRST_LOCK_SECONDS).
+FIRST_REFUSAL_LOCK_SECONDS = 30 * 60
+
+
 def refusal_lock(now):
     return {
-        "SearchTimeline": datetime.fromtimestamp(
-            now + DEFAULT_SEARCH_REFUSAL_LOCK_SECONDS, timezone.utc
-        )
+        "SearchTimeline": datetime.fromtimestamp(now + FIRST_REFUSAL_LOCK_SECONDS, timezone.utc)
     }
 
 

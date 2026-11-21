@@ -715,8 +715,8 @@ def _control_requests(httpx_mock: HTTPXMock) -> list[httpx.Request]:
 async def test_refused_search_quarantines_the_account_and_moves_on(
     httpx_mock: HTTPXMock, client_fixture: CF, monkeypatch
 ):
-    """X refused search for an account (vladkens/twscrape#367): it stays out of search for hours, not 5 minutes,
-    and the request goes on with the next account."""
+    """X refused search for an account (vladkens/twscrape#367): it stays out of search for 30 minutes on its first
+    refusal, not 5, and the request goes on with the next account."""
     pool, client = client_fixture
     monkeypatch.setattr("twscrape.queue_client.asyncio.sleep", _mock_sleep)
     await client.__aenter__()
@@ -730,7 +730,7 @@ async def test_refused_search_quarantines_the_account_and_moves_on(
     assert rep is not None and getattr(rep, "__username", None) == "user2"
     assert [r.headers["x-csrf-token"] for r in _control_requests(httpx_mock)] == ["csrf1"]
     locks = await _search_lock_hours(pool)
-    assert locks["user1"] == 6.0
+    assert locks["user1"] == 0.5
     assert locks["user2"] <= 0.25  # the normal in-use lock
 
 
@@ -751,7 +751,7 @@ async def test_search_refused_for_every_account_stops_without_retrying_them(
 
     search = [r for r in httpx_mock.get_requests() if r not in _control_requests(httpx_mock)]
     assert [r.headers["x-csrf-token"] for r in search] == ["csrf1", "csrf2"]
-    assert await _search_lock_hours(pool) == {"user1": 6.0, "user2": 6.0}
+    assert await _search_lock_hours(pool) == {"user1": 0.5, "user2": 0.5}
     assert issubclass(SearchRefusedError, ServiceUnavailableError)
 
 
@@ -776,7 +776,7 @@ async def test_search_404_after_fresh_signing_is_a_refusal(
     requests = httpx_mock.get_requests()
     assert [r.headers["x-csrf-token"] for r in requests] == ["csrf1"] * 4 + ["csrf2"]
     assert requests[3].url.path.endswith("/UserByScreenName") and requests[3].method == "GET"
-    assert (await _search_lock_hours(pool))["user1"] == 6.0
+    assert (await _search_lock_hours(pool))["user1"] == 0.5
 
 
 async def test_search_404_with_a_failing_control_read_is_not_a_search_limit(
@@ -805,15 +805,93 @@ async def test_search_refusal_lock_is_configurable(
 ):
     pool, client = client_fixture
     monkeypatch.setattr("twscrape.queue_client.asyncio.sleep", _mock_sleep)
-    monkeypatch.setenv("TWS_SEARCH_REFUSAL_LOCK_SECONDS", str(24 * 3600))
-    await client.__aenter__()
+    monkeypatch.setenv("TWS_SEARCH_REFUSAL_FIRST_LOCK_SECONDS", str(2 * 3600))
+    monkeypatch.setenv("TWS_SEARCH_REFUSAL_LOCK_SECONDS", str(5 * 3600))
+
+    assert await _refusal_lock_hours(httpx_mock, pool, client, times=3) == [2.0, 4.0, 5.0]
+
+
+async def _refuse_user1(httpx_mock: HTTPXMock, pool: AccountsPool, client: QueueClient) -> float:
+    """One request whose search user1 refuses (confirmed by the control read); user2 answers. user1's lock."""
+    await client._close_ctx()
+    await pool.reset_locks()
     httpx_mock.add_response(url=URL, json=REFUSED, status_code=200)
     httpx_mock.add_response(url=CONTROL_URL, json=CONTROL_OK, status_code=200)
     httpx_mock.add_response(url=URL, json={"foo": "ok"}, status_code=200)
+    rep = await client.get(URL)
+    assert rep is not None and getattr(rep, "__username") == "user2"
+    return (await _search_lock_hours(pool))["user1"]
 
-    await client.get(URL)
 
-    assert (await _search_lock_hours(pool))["user1"] == 24.0
+async def _refusal_lock_hours(
+    httpx_mock: HTTPXMock, pool: AccountsPool, client: QueueClient, times: int
+) -> list[float]:
+    return [await _refuse_user1(httpx_mock, pool, client) for _ in range(times)]
+
+
+async def _search_user1(httpx_mock: HTTPXMock, pool: AccountsPool, client: QueueClient, body):
+    await client._close_ctx()
+    await pool.reset_locks()
+    httpx_mock.add_response(url=URL, json=body, status_code=200)
+    rep = await client.get(URL)
+    assert rep is not None and getattr(rep, "__username") == "user1"
+
+
+SEARCH_PAGE = {
+    "data": {
+        "search_by_raw_query": {
+            "search_timeline": {"timeline": {"instructions": [{"type": "TimelineAddEntries"}]}}
+        }
+    }
+}
+
+
+async def test_consecutive_refusals_double_the_search_lock_up_to_the_cap(
+    httpx_mock: HTTPXMock, client_fixture: CF, monkeypatch
+):
+    """A short X-wide blip costs each account 30 minutes; an account X keeps refusing reaches 6 hours after a few
+    probes: 30 min, 1 h, 2 h, 4 h, 6 h, 6 h."""
+    pool, client = client_fixture
+    monkeypatch.setattr("twscrape.queue_client.asyncio.sleep", _mock_sleep)
+    monkeypatch.delenv("TWS_SEARCH_REFUSAL_FIRST_LOCK_SECONDS", raising=False)
+    monkeypatch.delenv("TWS_SEARCH_REFUSAL_LOCK_SECONDS", raising=False)
+
+    assert await _refusal_lock_hours(httpx_mock, pool, client, times=6) == [
+        0.5,
+        1.0,
+        2.0,
+        4.0,
+        6.0,
+        6.0,
+    ]
+    await client._close_ctx()
+
+
+async def test_a_search_with_timeline_data_resets_the_refusal_escalation(
+    httpx_mock: HTTPXMock, client_fixture: CF, monkeypatch
+):
+    """The count is per account and persists across requests; only a search with timeline data ends it."""
+    pool, client = client_fixture
+    monkeypatch.setattr("twscrape.queue_client.asyncio.sleep", _mock_sleep)
+    monkeypatch.delenv("TWS_SEARCH_REFUSAL_FIRST_LOCK_SECONDS", raising=False)
+    monkeypatch.delenv("TWS_SEARCH_REFUSAL_LOCK_SECONDS", raising=False)
+
+    assert await _refusal_lock_hours(httpx_mock, pool, client, times=2) == [0.5, 1.0]
+    # A fresh pool object reads the same accounts.db: the count is stored, not kept in memory.
+    client.pool = AccountsPool(pool._db_file)
+    await _search_user1(httpx_mock, pool, client, {"foo": "no timeline data"})
+    assert await _refuse_user1(httpx_mock, pool, client) == 2.0
+
+    await _search_user1(httpx_mock, pool, client, SEARCH_PAGE)
+    assert await _refusal_lock_hours(httpx_mock, pool, client, times=2) == [0.5, 1.0]
+    await client._close_ctx()
+
+    # The stored count does not leak into the Account model or the per-queue request counters.
+    user1 = await pool.get("user1")
+    assert user1.stats == {"SearchTimeline": 2}
+    assert {i["username"]: i["total_req"] for i in await pool.accounts_info()}["user1"] == 2
+    await pool.save(user1)
+    assert (await pool.get("user1")).stats == {"SearchTimeline": 2}
 
 
 async def test_search_503_with_internal_server_error_stays_transient(
