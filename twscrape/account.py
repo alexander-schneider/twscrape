@@ -63,6 +63,11 @@ def make_transport(proxy: str | None, impersonate: str | None) -> AsyncBaseTrans
     raise_without_context(clean)
 
 
+def is_reserved_stats_key(key: str) -> bool:
+    """`__name__` keys in an account's stats JSON hold pool state (budget, refusal streak), not counters."""
+    return len(key) >= 4 and key.startswith("__") and key.endswith("__")
+
+
 TOKEN = "Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA"
 
 
@@ -96,7 +101,12 @@ class Account(JSONTrait):
     def from_rs(rs: sqlite3.Row):
         doc = dict(rs)
         doc["locks"] = {k: utc.from_iso(v) for k, v in json.loads(doc["locks"]).items()}
-        doc["stats"] = {k: v for k, v in json.loads(doc["stats"]).items() if isinstance(v, int)}
+        # Request counters only: reserved __...__ keys (budget, refusal streak) belong to AccountsPool.
+        doc["stats"] = {
+            k: v
+            for k, v in json.loads(doc["stats"]).items()
+            if isinstance(v, int) and not is_reserved_stats_key(k)
+        }
         doc["headers"] = json.loads(doc["headers"])
         doc["cookies"] = json.loads(doc["cookies"])
         doc["active"] = bool(doc["active"])

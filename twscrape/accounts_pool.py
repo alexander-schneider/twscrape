@@ -9,7 +9,8 @@ from fake_useragent import UserAgent
 from httpx import HTTPStatusError
 
 from .account import Account
-from .db import execute, fetchall, fetchone
+from .budget import DAILY_STATS_KEY, FIRST_USED_STATS_KEY, AccountBudget, utc_day
+from .db import execute, execute_then_fetchone, fetchall, fetchone
 from .logger import logger
 from .login import LoginConfig, login
 from .utils import get_env_bool, parse_cookies, utc
@@ -19,7 +20,12 @@ class NoAccountError(Exception):
     pass
 
 
-class AccountInfo(TypedDict):
+class BudgetExhaustedError(NoAccountError):
+    """No account is free and at least one is held by its daily cap (TWS_ACCOUNT_DAILY_CAPS): the pool is out of
+    capacity for today, not refused by X."""
+
+
+class _AccountInfoBase(TypedDict):
     username: str
     logged_in: bool
     login_method: str
@@ -27,6 +33,10 @@ class AccountInfo(TypedDict):
     last_used: datetime | None
     total_req: int
     error_msg: str | None
+
+
+class AccountInfo(_AccountInfoBase, total=False):
+    budget: str  # only with TWS_ACCOUNT_PACING or TWS_ACCOUNT_DAILY_CAPS set
 
 
 GLOBAL_LOCK_QUEUE = "__global__"
@@ -64,6 +74,8 @@ class AccountsPool:
         self._raise_when_no_account = raise_when_no_account
         self._wait_timeout = wait_timeout
         self._wait_interval = wait_interval
+        # Read once, so a malformed TWS_ACCOUNT_PACING etc. fails here, not on the first request.
+        self.budget = AccountBudget.from_env()
 
     def _usernames_where(self, usernames: list[str]) -> tuple[str, dict[str, str]]:
         placeholders = []
@@ -198,14 +210,18 @@ class AccountsPool:
         data = account.to_rs()
         cols = list(data.keys())
 
-        # Account.stats holds only the integer request counters; keep the stored refusal streak, which the
-        # loaded Account never carries, instead of erasing it on every save (for example after a login).
-        path = f'$."{REFUSALS_STATS_KEY}"'
-        keep_streak = f"""stats=CASE
-            WHEN json_extract(accounts.stats, '{path}') IS NULL THEN excluded.stats
-            ELSE json_set(excluded.stats, '{path}', json(json_extract(accounts.stats, '{path}')))
-        END"""
-        updates = [keep_streak if x == "stats" else f"{x}=excluded.{x}" for x in cols]
+        # Account.stats holds only the request counters; the reserved __...__ keys (refusal streak, daily counts,
+        # first use) are never loaded into it, so copy them from the stored row instead of erasing them on every
+        # save (for example after a login). Objects and arrays stay JSON, strings and numbers stay scalars.
+        keep_reserved = r"""stats=json_patch(excluded.stats, (
+            SELECT json_group_object(
+                stored.key,
+                CASE WHEN stored.type IN ('object', 'array') THEN json(stored.value) ELSE stored.value END
+            )
+            FROM json_each(accounts.stats) AS stored
+            WHERE stored.key LIKE '\_\_%\_\_' ESCAPE '\'
+        ))"""
+        updates = [keep_reserved if x == "stats" else f"{x}=excluded.{x}" for x in cols]
         qs = f"""
         INSERT INTO accounts ({",".join(cols)}) VALUES ({",".join([f":{x}" for x in cols])})
         ON CONFLICT(username) DO UPDATE SET {",".join(updates)}
@@ -333,6 +349,50 @@ class AccountsPool:
         )
         return int(rs[0]) if rs and rs[0] else 1
 
+    async def first_used(self, username: str) -> datetime:
+        """When the account sent its first budgeted request; stored once, on the first call (the warm-up clock)."""
+        path = f'$."{FIRST_USED_STATS_KEY}"'
+        qs = f"""
+        UPDATE accounts SET stats = json_set(stats, '{path}', :now)
+        WHERE username = :username AND json_extract(stats, '{path}') IS NULL
+        """
+        await execute(self._db_file, qs, {"username": username, "now": utc.now().isoformat()})
+        rs = await fetchone(
+            self._db_file,
+            f"SELECT json_extract(stats, '{path}') FROM accounts WHERE username = :username",
+            {"username": username},
+        )
+        return utc.from_iso(rs[0]) if rs and rs[0] else utc.now()
+
+    async def count_request(self, username: str, queue: str, cap: int | None) -> int | None:
+        """Counts one request of the account on `queue` for today (UTC) before it is sent; returns the new count.
+
+        One UPDATE checks the cap and increments, so two processes cannot both pass a full cap. Returns None and
+        counts nothing when today's count has already reached `cap`. A new UTC day starts again at 1.
+        """
+        path = f'$."{DAILY_STATS_KEY}"."{queue}"'
+        same_day = f"json_extract(stats, '{path}.day') = :day"
+        count = f"COALESCE(json_extract(stats, '{path}.count'), 0)"
+        qs = f"""
+        UPDATE accounts SET
+            stats = json_set(
+                stats, '{path}',
+                json_object('day', :day, 'count', CASE WHEN {same_day} THEN {count} + 1 ELSE 1 END)
+            )
+        WHERE username = :username
+            AND (:cap IS NULL OR json_extract(stats, '{path}.day') IS NOT :day OR {count} < :cap)
+        """
+        # Read in the same transaction: changes() says whether this call counted, and the count is its own
+        # (a shared row marker let a concurrent call overwrite the first call's result).
+        read = f"""
+        SELECT changes(), json_extract(stats, '{path}.count') FROM accounts WHERE username = :username
+        """
+        params = {"username": username, "day": utc_day(utc.now()), "cap": cap}
+        rs = await execute_then_fetchone(self._db_file, qs, read, params)
+        if not rs or rs[0] != 1 or rs[1] is None:
+            return None
+        return int(rs[1])
+
     async def reset_refusals(self, username: str, queue: str) -> None:
         """Ends the account's refusal streak on `queue`; writes nothing when there is none."""
         path = f'$."{REFUSALS_STATS_KEY}"."{queue}"'
@@ -420,6 +480,17 @@ class AccountsPool:
 
             if give_up:
                 if raise_no_account:
+                    capped = await self.accounts_held_by_cap(queue)
+                    # One active account held by its cap means X still lets it search: the pool is out of its
+                    # own capacity, even if X refuses the others. Only a pool without a capped account is an
+                    # outage the caller sees as NoAccountError (api.adanos.org#3565: no paid fallback for caps).
+                    if capped:
+                        cap = self.budget.daily_caps[queue]
+                        active = await self._active_usernames()
+                        raise BudgetExhaustedError(
+                            f"No account available for queue {queue}: {len(capped)} of {len(active)} active "
+                            f"account(s) used their daily cap ({queue}={cap} per UTC day, less during warm-up)"
+                        )
                     raise NoAccountError(f"No account available for queue {queue}")
                 if no_active:
                     logger.warning("No active accounts. Stopping...")
@@ -436,6 +507,34 @@ class AccountsPool:
                 self._wait_interval if remaining is None else min(self._wait_interval, remaining)
             )
             await asyncio.sleep(interval)
+
+    async def _active_usernames(self) -> set[str]:
+        rs = await fetchall(self._db_file, "SELECT username FROM accounts WHERE active = true")
+        return {row["username"] for row in rs}
+
+    async def accounts_held_by_cap(self, queue: str) -> list[str]:
+        """Active accounts whose count today (UTC) has reached their cap on `queue`, warm-up included."""
+        if queue not in self.budget.daily_caps:
+            return []
+        rs = await fetchall(
+            self._db_file, "SELECT username, stats FROM accounts WHERE active = true"
+        )
+        now = utc.now()
+        today = utc_day(now)
+        capped = []
+        for row in rs:
+            stats = json.loads(row["stats"] or "{}")
+            daily = (stats.get(DAILY_STATS_KEY) or {}).get(queue)
+            if not isinstance(daily, dict) or daily.get("day") != today:
+                continue
+            first_used = stats.get(FIRST_USED_STATS_KEY)
+            fraction = self.budget.fraction(
+                utc.from_iso(first_used) if isinstance(first_used, str) else None, now
+            )
+            cap = self.budget.cap_for(queue, fraction)
+            if cap is not None and isinstance(daily.get("count"), int) and daily["count"] >= cap:
+                capped.append(row["username"])
+        return capped
 
     async def _earliest_unlock(self, queue: str) -> str | None:
         """When the first locked active account is free for `queue`: per account the later of its `queue` lock and
@@ -522,6 +621,14 @@ class AccountsPool:
 
     async def accounts_info(self):
         accounts = await self.get_all()
+        budgets: dict[str, str] = {}
+        if self.budget.pacing or self.budget.daily_caps:
+            now = utc.now()
+            rs = await fetchall(self._db_file, "SELECT username, stats FROM accounts")
+            budgets = {
+                row["username"]: self.budget.describe(json.loads(row["stats"] or "{}"), now)
+                for row in rs
+            }
 
         items: list[AccountInfo] = []
         for x in accounts:
@@ -534,6 +641,8 @@ class AccountsPool:
                 "total_req": sum(x.stats.values()),
                 "error_msg": str(x.error_msg)[0:60],
             }
+            if x.username in budgets:
+                item["budget"] = budgets[x.username]
             items.append(item)
 
         old_time = datetime(1970, 1, 1).replace(tzinfo=timezone.utc)

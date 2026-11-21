@@ -249,9 +249,17 @@ class API:
         limit=-1,
         cursor_type="Bottom",
         features: dict | None = None,
+        max_pages: int | None = None,
     ):
-        """`features` replaces the shared GQL_FEATURES for operations that send their own exact set."""
+        """`features` replaces the shared GQL_FEATURES for operations that send their own exact set.
+
+        `max_pages` bounds the HTTP requests of this call: every page request counts, also the empty, cursor-only
+        pages followed on their own. None pages until the end, as before.
+        """
+        if max_pages is not None and max_pages < 1:
+            raise ValueError(f"max_pages must be 1 or more, or None; got {max_pages}")
         queue, cur, cnt, active = op.split("/")[-1], None, 0, True
+        requests = 0
         kv = {**kv}
         ft = dict(features) if features is not None else {**GQL_FEATURES, **(ft or {})}
         seen_cursors: set[str] = set()
@@ -262,6 +270,9 @@ class API:
             self.pool, queue, self.debug, proxy=self.proxy, impersonate=self.impersonate
         ) as client:
             while active:
+                if max_pages is not None and requests >= max_pages:
+                    return
+                requests += 1
                 params = {"variables": kv, "features": ft}
                 if cur is not None:
                     params["variables"]["cursor"] = cur
@@ -326,7 +337,8 @@ class API:
 
     # search
 
-    async def search_raw(self, q: str, limit=-1, kv: KV = None):
+    async def search_raw(self, q: str, limit=-1, kv: KV = None, max_pages: int | None = None):
+        """SearchTimeline pages. `max_pages` caps the requests of this call (e.g. 1 while search is paced)."""
         op = OP_SearchTimeline
         extra = {"product": "Latest", **(kv or {})}
         product = extra.pop("product")
@@ -344,13 +356,16 @@ class API:
             ),
             **extra,
         }
-        gen_items = self._gql_items(op, kv, limit=limit, features=SEARCH_TIMELINE_FEATURES)
+        gen_items = self._gql_items(
+            op, kv, limit=limit, features=SEARCH_TIMELINE_FEATURES, max_pages=max_pages
+        )
         async with aclosing(gen_items) as gen:
             async for x in gen:
                 yield x
 
-    async def search(self, q: str, limit=-1, kv: KV = None):
-        async for x in self._iter_unique(self.search_raw(q, kv=kv), parse_tweets, limit):
+    async def search(self, q: str, limit=-1, kv: KV = None, max_pages: int | None = None):
+        raw = self.search_raw(q, kv=kv, max_pages=max_pages)
+        async for x in self._iter_unique(raw, parse_tweets, limit):
             yield x
 
     async def search_user(self, q: str, limit=-1, kv: KV = None):

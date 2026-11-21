@@ -1,6 +1,9 @@
 import asyncio
 import json
+import math
 import os
+from collections.abc import Awaitable, Callable
+from datetime import datetime
 from typing import Any
 from urllib.parse import urlparse
 
@@ -9,6 +12,7 @@ from httpx import AsyncClient, Response
 
 from .account import Account, resolve_proxy
 from .accounts_pool import GLOBAL_LOCK_QUEUE, AccountsPool, has_required_cookies
+from .budget import next_utc_midnight
 from .logger import LogOnce, logger
 from .utils import utc
 from .xclid import XClIdAccountError, XClIdGen, XClIdParseError
@@ -73,6 +77,10 @@ class ServiceUnavailableError(UnexpectedApiError): ...
 
 class SearchRefusedError(ServiceUnavailableError):
     """X refused SearchTimeline for every account tried; each one is quarantined (vladkens/twscrape#367)."""
+
+
+class DailyCapReached(Exception):
+    """The account has used its daily cap on the queue; it sends nothing more there until UTC midnight."""
 
 
 class NotFoundAfterSigningError(AbortReqError):
@@ -228,6 +236,16 @@ class Ctx:
         self.proxy = proxy
         self.impersonate = impersonate
         self.failures = {"transport": 0, "loadshed": 0}
+        # Called before every request this context sends (budget accounting); set by QueueClient.
+        self.before_send: Callable[[], Awaitable[None]] | None = None
+        # Unix time before which this account must not send again on the queue (pacing); None when not paced.
+        self.next_send_at: float | None = None
+        # Fresh x-client-transaction-ids tried on a 404; a paced queue signs once (every send waits the pace).
+        self.signing_attempts = 3
+        # Unix seconds until which the account's daily cap on the queue holds it; None below the cap.
+        self.cap_until: int | None = None
+        # The account's first budgeted request (warm-up clock), read once per context.
+        self.first_used: datetime | None = None
 
     async def retry(self, kind: str, limit: int) -> bool:
         self.failures[kind] += 1
@@ -254,11 +272,13 @@ class Ctx:
         path = urlparse(url).path or "/"
 
         tries = 0
-        while tries < 3:
+        while tries < self.signing_attempts:
             gen = await XClIdGenStore.get(
                 self.acc, proxy=self.proxy, fresh=tries > 0, impersonate=self.impersonate
             )
             hdr = {"x-client-transaction-id": gen.calc(method, path)}
+            if self.before_send is not None:
+                await self.before_send()
             rep = await self.clt.request(method, url, params=params, json=json, headers=hdr)
             if rep.status_code != 404:
                 return rep
@@ -324,10 +344,63 @@ class QueueClient:
         self.ctx: Ctx | None = None
         self.proxy = proxy
         self.impersonate = impersonate
+        self.budget = pool.budget
+        # Until when each account released by this client is held by pacing or its cap (unix seconds).
+        self._budget_floors: dict[str, int] = {}
 
     def _ctx_for(self, acc: Account) -> "Ctx":
         clt = acc.make_client(proxy=self.proxy, impersonate=self.impersonate)
-        return Ctx(acc, clt, proxy=self.proxy, impersonate=self.impersonate)
+        ctx = Ctx(acc, clt, proxy=self.proxy, impersonate=self.impersonate)
+        if self.budget.applies_to(self.queue):
+            ctx.before_send = lambda: self._before_send(ctx)
+        if self.queue in self.budget.pacing:
+            ctx.signing_attempts = 1
+        return ctx
+
+    async def _before_send(self, ctx: "Ctx") -> None:
+        """Budget accounting for one request the account is about to send on this queue.
+
+        On a paced queue it first waits until the account's last send plus its pace, so retries within one
+        context (transport errors) are paced too; across contexts the release lock holds the same minimum. The
+        daily count is stored before the request goes out (X counts requests, failed ones too). An account
+        already at its cap sends nothing: DailyCapReached moves the request to another account.
+        """
+        if ctx.next_send_at is not None:
+            wait = ctx.next_send_at - utc.now().timestamp()
+            if wait > 0:
+                await asyncio.sleep(wait)
+        if ctx.first_used is None:
+            ctx.first_used = await self.pool.first_used(ctx.acc.username)
+        fraction = self.budget.fraction(ctx.first_used, utc.now())
+        cap = self.budget.cap_for(self.queue, fraction)
+        if cap is not None:
+            count = await self.pool.count_request(ctx.acc.username, self.queue, cap)
+            if count is None or count >= cap:
+                ctx.cap_until = next_utc_midnight(utc.now())
+            if count is None:
+                raise DailyCapReached(
+                    f"{ctx.acc.username} used its daily cap of {cap} on {self.queue}"
+                )
+        pace = self.budget.pace_seconds(self.queue, fraction)
+        if pace is not None:
+            ctx.next_send_at = utc.now().timestamp() + pace
+
+    def _budget_floor(self, ctx: "Ctx") -> int:
+        """The earliest the account may use this queue again under its budget (unix seconds), or 0: the end of
+        its cap day, or its last send plus its pace (rounded up, as locks have whole seconds)."""
+        floor = ctx.cap_until or 0
+        if ctx.next_send_at is not None:
+            floor = max(floor, math.ceil(ctx.next_send_at))
+        return floor
+
+    async def _release_held(self, usernames: list[str]) -> None:
+        """Release accounts given up after a transient error, but not before their pacing or cap ends."""
+        for username in usernames:
+            floor = self._budget_floors.get(username, 0)
+            if floor > utc.ts():
+                await self.pool.lock_until(username, self.queue, floor)
+            else:
+                await self.pool.unlock(username, self.queue)
 
     async def __aenter__(self):
         await self._get_ctx()
@@ -353,6 +426,12 @@ class QueueClient:
         if inactive:
             await self.pool.mark_inactive(username, msg, queue=self.queue, req_count=ctx.req_count)
             return
+
+        # Pacing (and caps) hold the account at least this long; a longer lock set by the caller wins.
+        floor = self._budget_floor(ctx)
+        if floor:
+            self._budget_floors[username] = floor
+            reset_at = max(reset_at, floor)
 
         if reset_at > 0:
             if global_lock:
@@ -685,7 +764,14 @@ class QueueClient:
                 ctx.req_count += 1  # count only successful
                 ctx.reset_failures()
                 unknown_retry, transient_api_retry = 0, 0
+                if self._budget_floor(ctx):
+                    # A paced account goes back to the pool with its lock; the next page takes the next one.
+                    await self._close_ctx()
                 return rep
+            except DailyCapReached as e:
+                logger.info(f"{e}; it waits for the next UTC day")
+                await self._close_ctx()
+                continue
             except NotFoundAfterSigningError as e:
                 if self.queue != SEARCH_QUEUE:
                     raise
@@ -712,8 +798,7 @@ class QueueClient:
                 transient_api_retry += 1
                 if transient_api_retry >= TRANSIENT_API_ERROR_RETRY_LIMIT:
                     # Every account tried failed, so X failed as a whole: release them.
-                    for username in held:
-                        await self.pool.unlock(username, self.queue)
+                    await self._release_held(held)
                     raise e
                 # X refuses SearchTimeline for some accounts only (vladkens/twscrape#367).
                 # Other operations keep retrying the same account.

@@ -149,6 +149,22 @@ async def fetchone(db_path: str, qs: str, params: dict | None = None):
 
 
 @lock_retry()
+async def execute_then_fetchone(
+    db_path: str, write_qs: str, read_qs: str, params: dict | None = None
+):
+    """Runs a write and a read in one transaction on one connection.
+
+    The write takes SQLite's write lock and holds it until the commit, so no other writer can change the row
+    between the two statements, and `changes()` in the read reports this write alone. Works on every SQLite
+    version, unlike UPDATE ... RETURNING (3.35+).
+    """
+    async with DB(db_path) as db:
+        await db.execute(write_qs, params)
+        async with db.execute(read_qs, params) as cur:
+            return await cur.fetchone()
+
+
+@lock_retry()
 async def fetchall(db_path: str, qs: str, params: dict | None = None):
     async with DB(db_path) as db:
         async with db.execute(qs, params) as cur:
