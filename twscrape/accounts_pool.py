@@ -30,6 +30,9 @@ class AccountInfo(TypedDict):
 
 
 GLOBAL_LOCK_QUEUE = "__global__"
+# Matches the placeholder lock `_get_and_lock` puts on an account in use; such an account comes back when its
+# request ends, so only a lock beyond this horizon (plus a minute of slack) means no account is coming.
+IN_USE_LOCK_SECONDS = 15 * 60
 
 
 def has_required_cookies(cookies: dict[str, str]) -> bool:
@@ -362,6 +365,12 @@ class AccountsPool:
             nat = await self.next_available_at(queue)
             no_active = not nat
             timed_out = deadline is not None and loop.time() >= deadline
+            if deadline is not None and not timed_out:
+                wait_s = await self.seconds_until_available(queue)
+                # Every account is held for longer than the wait could last, e.g. quarantined from search.
+                timed_out = wait_s is not None and wait_s > max(
+                    deadline - loop.time(), IN_USE_LOCK_SECONDS + 60
+                )
             give_up = no_active or self._wait_timeout is None or timed_out
 
             if give_up:
@@ -382,6 +391,21 @@ class AccountsPool:
                 self._wait_interval if remaining is None else min(self._wait_interval, remaining)
             )
             await asyncio.sleep(interval)
+
+    async def seconds_until_available(self, queue: str) -> float | None:
+        """Seconds until the earliest lock on `queue` (or the global lock) of an active account ends."""
+        qs = f"""
+        SELECT MIN(lock_entry.value) as lock_until
+        FROM accounts
+        JOIN json_each(locks) AS lock_entry
+        WHERE active = true
+            AND lock_entry.key IN ('{queue}', '{GLOBAL_LOCK_QUEUE}')
+            AND lock_entry.value IS NOT NULL
+        """
+        rs = await fetchone(self._db_file, qs)
+        if not rs or not rs[0]:
+            return None
+        return max(0.0, (utc.from_iso(rs[0]) - utc.now()).total_seconds())
 
     async def next_available_at(self, queue: str):
         qs = f"""

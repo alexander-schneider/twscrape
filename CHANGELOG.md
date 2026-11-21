@@ -26,6 +26,10 @@ asking X for search once it refused an account.
   account; without one, or after three refused accounts, it raises
   `SearchRefusedError` (a `ServiceUnavailableError`). Each refused account is
   asked once per request. Other transient errors keep their behavior.
+- `get_for_queue_or_wait` gives up at once when the earliest account comes back
+  later than the wait could last and later than an in-use account's 15-minute
+  placeholder, for example when every account is quarantined from search.
+  Before, each request waited out its full timeout.
 
 ### Added
 

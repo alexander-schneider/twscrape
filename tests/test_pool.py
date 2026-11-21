@@ -1,6 +1,6 @@
 import pytest
 
-from twscrape.accounts_pool import GLOBAL_LOCK_QUEUE, AccountsPool
+from twscrape.accounts_pool import GLOBAL_LOCK_QUEUE, AccountsPool, NoAccountError
 from twscrape.api import API
 from twscrape.utils import utc
 
@@ -379,3 +379,39 @@ async def test_get_stats(pool_mock: AccountsPool):
     assert stats["total"] == 1
     assert stats["active"] == 1
     assert stats[f"locked_{Q}"] == 1
+
+
+async def test_get_for_queue_or_wait_gives_up_at_once_when_every_account_is_quarantined(
+    pool_mock: AccountsPool, monkeypatch
+):
+    """Every account is out of search for hours: waiting out the timeout cannot find one, so give up now."""
+    pool = AccountsPool(pool_mock._db_file, wait_timeout=900, raise_when_no_account=True)
+    await pool.add_account("user1", "pass1", "email1", "ep1", cookies="auth_token=t; ct0=c")
+    await pool.lock_until("user1", "SearchTimeline", utc.ts() + 6 * 3600)
+    slept = []
+
+    async def fake_sleep(interval):
+        slept.append(interval)
+
+    monkeypatch.setattr("twscrape.accounts_pool.asyncio.sleep", fake_sleep)
+
+    with pytest.raises(NoAccountError):
+        await pool.get_for_queue_or_wait("SearchTimeline")
+    assert slept == []
+
+
+async def test_get_for_queue_or_wait_still_waits_for_an_account_in_use(
+    pool_mock: AccountsPool, monkeypatch
+):
+    """An account in use carries a 15-minute placeholder lock and comes back when its request ends."""
+    pool = AccountsPool(pool_mock._db_file, wait_timeout=900, wait_interval=0.1)
+    await pool.add_account("user1", "pass1", "email1", "ep1", cookies="auth_token=t; ct0=c")
+    assert await pool.get_for_queue("SearchTimeline") is not None
+
+    async def fake_sleep(interval):
+        await pool.unlock("user1", "SearchTimeline")
+
+    monkeypatch.setattr("twscrape.accounts_pool.asyncio.sleep", fake_sleep)
+
+    account = await pool.get_for_queue_or_wait("SearchTimeline")
+    assert account is not None and account.username == "user1"
