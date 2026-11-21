@@ -1,5 +1,52 @@
 # Changelog
 
+## v0.22.2 - 2026-11-21
+
+Two more reviews of v0.22.1 found credentials still reachable through
+exception chains, DEBUG logs and unparseable proxy URLs, and gaps in the
+search refusal handling.
+
+### Fixed
+
+- No proxy credentials in exception chains. The clean transport error was
+  raised inside the `except` block, so its `__context__` still held the
+  original libcurl or httpx error with the proxy URL, which Sentry, loguru's
+  `diagnose` and `exc_info` formatters print. Clean errors are now raised
+  outside the block, and an error whose cause, context or group members carry
+  credentials is replaced too.
+- No credentials in aiosqlite DEBUG logs. aiosqlite logs every database call
+  with its SQL parameters (proxy URLs, passwords, cookies). twscrape adds a
+  filter to the `aiosqlite` logger that drops records below WARNING, also when
+  an application sets that logger to DEBUG.
+- No fragments of a proxy password. When a proxy URL does not parse cleanly
+  (for example a raw `/` in the password, or `:` and `@` in it), httpx and curl
+  print pieces of the password, such as `Invalid port: 'pa%40ss'`. If the
+  proxy URL does not parse cleanly, or a userinfo fragment of 3 or more
+  characters survives redaction, the message becomes `proxy URL rejected by
+  httpx/curl; credentials removed`. The exception type is kept.
+- Every HTTP 5xx is transient, whatever its body. A 503 with a plain-text or
+  empty body (or a 5xx with an unknown GraphQL error) took the 15-minute
+  account lock and retried on another account. It now raises
+  `ServiceUnavailableError` on the temporary-failure path, for every queue.
+- A control read that answers `{"data": null}`, `{"data": {"user": null}}`, a
+  non-object or invalid JSON no longer raises `AttributeError` with no
+  cooldown. It is inconclusive: the account cools down for 30 minutes and the
+  request fails.
+- Saving a loaded `Account` (for example after a login) keeps its search
+  refusal streak; v0.22.1 reset it, so the graded lock started again at 30
+  minutes.
+- Lock times are compared by time, not text. `save` writes
+  `2026-11-21T09:00:00+00:00` and `lock_until` writes `2026-11-21 14:00:00`;
+  as text the first sorts later. The wait estimate took the 09:00 lock over the
+  14:00 one, and an expired ISO lock kept the account out of `get_for_queue`
+  and counted in `stats`.
+
+### Changed
+
+- `twscrape reset_locks` (`AccountsPool.reset_locks`) also ends every search
+  refusal streak, so an account an operator puts back starts at the 30-minute
+  step again.
+
 ## v0.22.1 - 2026-11-21
 
 A review of v0.22.0 found that one short X-wide error could keep a whole pool
