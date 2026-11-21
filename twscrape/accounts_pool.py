@@ -371,11 +371,11 @@ class AccountsPool:
         SELECT username FROM accounts
         WHERE active = true AND (
             json_extract(locks, '$."{GLOBAL_LOCK_QUEUE}"') IS NULL
-            OR json_extract(locks, '$."{GLOBAL_LOCK_QUEUE}"') < datetime('now')
+            OR datetime(json_extract(locks, '$."{GLOBAL_LOCK_QUEUE}"')) < datetime('now')
         ) AND (
             locks IS NULL
             OR json_extract(locks, '$.{queue}') IS NULL
-            OR json_extract(locks, '$.{queue}') < datetime('now')
+            OR datetime(json_extract(locks, '$.{queue}')) < datetime('now')
         )
         ORDER BY {self._order_by}
         LIMIT 1
@@ -434,10 +434,13 @@ class AccountsPool:
 
     async def _earliest_unlock(self, queue: str) -> str | None:
         """When the first locked active account is free for `queue`: per account the later of its `queue` lock and
-        its global lock (both must have ended), then the earliest across accounts."""
+        its global lock (both must have ended), then the earliest across accounts.
+
+        Locks come in two formats (save writes ISO with a T and +00:00, lock_until 'YYYY-MM-DD HH:MM:SS'), so
+        every comparison goes through julianday()/datetime(), never the text."""
         qs = f"""
-        SELECT MIN(account_until) AS lock_until FROM (
-            SELECT MAX(lock_entry.value) AS account_until
+        SELECT datetime(MIN(account_until)) AS lock_until FROM (
+            SELECT MAX(julianday(lock_entry.value)) AS account_until
             FROM accounts
             JOIN json_each(locks) AS lock_entry
             WHERE active = true
@@ -494,7 +497,7 @@ class AccountsPool:
             return f"""
             SELECT COUNT(*) FROM accounts
             WHERE json_extract(locks, '$.{queue}') IS NOT NULL
-                AND json_extract(locks, '$.{queue}') > datetime('now')
+                AND datetime(json_extract(locks, '$.{queue}')) > datetime('now')
             """
 
         qs = "SELECT DISTINCT(f.key) as k from accounts, json_each(locks) f"
