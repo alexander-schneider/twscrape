@@ -20,7 +20,12 @@ import pytest
 from pytest_httpx import HTTPXMock
 
 import twscrape
-from twscrape.accounts_pool import AccountsPool, BudgetExhaustedError, NoAccountError
+from twscrape.accounts_pool import (
+    GLOBAL_LOCK_QUEUE,
+    AccountsPool,
+    BudgetExhaustedError,
+    NoAccountError,
+)
 from twscrape.api import API
 from twscrape.budget import AccountBudget
 from twscrape.db import execute, fetchone
@@ -479,17 +484,44 @@ async def test_requests_end_with_budget_exhausted_when_every_account_used_its_ca
 
 
 @pytest.mark.parametrize("wait_timeout", [None, 900])
-async def test_a_capped_account_among_held_ones_makes_it_budget_exhausted(
+async def test_budget_exhausted_only_when_every_active_account_is_held_by_its_cap(
     tmp_path, monkeypatch, wait_timeout
 ):
-    """user1 is at its cap, user2 is quarantined from search: at least one account is held by its cap."""
-    pool = await make_pool(tmp_path, monkeypatch, TWS_ACCOUNT_DAILY_CAPS="SearchTimeline=400")
-    await hold_by_cap(pool, "user1", 400)
-    await pool.lock_until("user2", "SearchTimeline", utc.ts() + 6 * 3600)
+    pool = await make_pool(
+        tmp_path, monkeypatch, accounts=3, TWS_ACCOUNT_DAILY_CAPS="SearchTimeline=400"
+    )
+    for username in ("user1", "user2", "user3"):
+        await hold_by_cap(pool, username, 400)
+    await pool.set_active("user3", False)  # an inactive account does not count either way
     monkeypatch.setattr("twscrape.accounts_pool.asyncio.sleep", _no_sleep)
 
-    with pytest.raises(BudgetExhaustedError):
+    with pytest.raises(BudgetExhaustedError, match="2 account"):
         await waiting_pool(pool, wait_timeout=wait_timeout).get_for_queue_or_wait("SearchTimeline")
+
+
+@pytest.mark.parametrize("wait_timeout", [None, 900])
+@pytest.mark.parametrize("other", ["refused", "cooldown", "global_lock"])
+async def test_a_capped_account_among_otherwise_held_ones_is_no_account_error(
+    tmp_path, monkeypatch, wait_timeout, other
+):
+    """5 accounts: X refuses 4, the 5th reached its cap. That is an outage, not capacity: the app's outage
+    breaker and fallbacks must start, so the error stays the plain NoAccountError."""
+    pool = await make_pool(
+        tmp_path, monkeypatch, accounts=5, TWS_ACCOUNT_DAILY_CAPS="SearchTimeline=400"
+    )
+    await hold_by_cap(pool, "user5", 400)
+    for i in range(1, 5):
+        if other == "refused":
+            await pool.lock_until(f"user{i}", "SearchTimeline", utc.ts() + 6 * 3600)
+        elif other == "cooldown":
+            await pool.lock_until(f"user{i}", "SearchTimeline", utc.ts() + 30 * 60)
+        else:
+            await pool.lock_until(f"user{i}", GLOBAL_LOCK_QUEUE, utc.ts() + 3 * 3600)
+    monkeypatch.setattr("twscrape.accounts_pool.asyncio.sleep", _no_sleep)
+
+    with pytest.raises(NoAccountError) as exc_info:
+        await waiting_pool(pool, wait_timeout=wait_timeout).get_for_queue_or_wait("SearchTimeline")
+    assert type(exc_info.value) is NoAccountError
 
 
 @pytest.mark.parametrize(
