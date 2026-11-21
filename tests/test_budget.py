@@ -373,11 +373,54 @@ async def set_stat(pool: AccountsPool, username: str, key: str, value) -> None:
     [(None, 0.1), (0, 0.1), (5, 0.55), (10, 1.0), (30, 1.0)],
 )
 def test_the_warm_up_fraction_ramps_from_the_start_fraction_to_one(age_days, expected):
-    now = datetime(2026, 11, 22, 12, tzinfo=timezone.utc)
-    first_used = None if age_days is None else now - timedelta(days=age_days)
+    """Age counts whole days up to the start of the current UTC day."""
+    day_start = datetime(2026, 11, 22, tzinfo=timezone.utc)
+    first_used = None if age_days is None else day_start - timedelta(days=age_days)
     budget = AccountBudget(warmup_days=10, warmup_start_fraction=0.1)
-    assert budget.fraction(first_used, now) == pytest.approx(expected)
-    assert AccountBudget().fraction(first_used, now) == 1.0  # warm-up off
+    for now in (day_start, day_start + timedelta(hours=12), day_start + timedelta(hours=23.9)):
+        assert budget.fraction(first_used, now) == pytest.approx(expected)
+        assert AccountBudget().fraction(first_used, now) == 1.0  # warm-up off
+
+
+def test_the_warm_up_fraction_is_stable_within_a_utc_day_and_steps_at_midnight():
+    """Review round 1 (P1): a cap that grows during the day turns a capped account into an uncapped one hours
+    after its midnight lock was set. The fraction uses the age at the start of the UTC day."""
+    budget = AccountBudget(warmup_days=10, warmup_start_fraction=0.1)
+    first_used = datetime(
+        2026, 11, 17, 12, tzinfo=timezone.utc
+    )  # 4.5 days before 2026-11-22 00:00
+    morning = budget.fraction(first_used, datetime(2026, 11, 22, 0, 30, tzinfo=timezone.utc))
+    evening = budget.fraction(first_used, datetime(2026, 11, 22, 23, 30, tzinfo=timezone.utc))
+    tomorrow = budget.fraction(first_used, datetime(2026, 11, 23, 0, 30, tzinfo=timezone.utc))
+    assert morning == evening == pytest.approx(0.505)
+    assert tomorrow == pytest.approx(0.595)
+    # Used for the first time today: day 0 all day.
+    today = datetime(2026, 11, 22, 18, tzinfo=timezone.utc)
+    assert budget.fraction(today, today + timedelta(hours=5)) == pytest.approx(0.1)
+
+
+def start_of_utc_day(now: datetime) -> datetime:
+    return datetime.combine(now.date(), datetime.min.time(), timezone.utc)
+
+
+async def test_an_account_at_its_warm_up_cap_stays_capped_later_that_day(tmp_path, monkeypatch):
+    """Cap reached at 10:00, checked again at 12:00 the same UTC day: still out of capacity, not an outage."""
+    pool = await make_pool(
+        tmp_path,
+        monkeypatch,
+        accounts=1,
+        TWS_ACCOUNT_DAILY_CAPS="SearchTimeline=400",
+        TWS_WARMUP_DAYS="10",
+    )
+    ten = start_of_utc_day(utc.now()) + timedelta(hours=10)
+    await set_stat(pool, "user1", "__first_used__", (ten - timedelta(days=1)).isoformat())
+    # Day 1 of 10 counted from the start of today: 14 h old -> fraction 0.1525 -> cap 61.
+    for now in (ten, ten + timedelta(hours=2)):
+        monkeypatch.setattr(utc, "now", staticmethod(lambda now=now: now))
+        await hold_by_cap(pool, "user1", 61)
+        assert await pool.accounts_held_by_cap("SearchTimeline") == ["user1"]
+        with pytest.raises(BudgetExhaustedError):
+            await waiting_pool(pool, wait_timeout=900).get_for_queue_or_wait("SearchTimeline")
 
 
 @pytest.mark.parametrize(
@@ -406,7 +449,7 @@ async def test_warm_up_slows_pacing_and_lowers_the_cap(
 
     monkeypatch.setattr(AccountBudget, "pace_seconds", recorded_pace)
     if age_days is not None:
-        first_used = (utc.now() - timedelta(days=age_days)).isoformat()
+        first_used = (start_of_utc_day(utc.now()) - timedelta(days=age_days)).isoformat()
         await set_stat(pool, "user1", "__first_used__", first_used)
     # One request short of the expected cap, so this request reaches it and locks until midnight.
     today = utc.now().date().isoformat()
