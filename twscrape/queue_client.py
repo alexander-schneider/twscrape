@@ -308,8 +308,8 @@ class QueueClient:
         self.proxy = proxy
         self.impersonate = impersonate
         self.budget = pool.budget
-        # Until when each account released by this client is paced (unix seconds); see _release_held.
-        self._pace_floors: dict[str, int] = {}
+        # Until when each account released by this client is held by pacing or its cap (unix seconds).
+        self._budget_floors: dict[str, int] = {}
 
     def _ctx_for(self, acc: Account) -> "Ctx":
         clt = acc.make_client(proxy=self.proxy, impersonate=self.impersonate)
@@ -346,9 +346,9 @@ class QueueClient:
         return floor
 
     async def _release_held(self, usernames: list[str]) -> None:
-        """Release accounts given up after a transient error, but not before their pacing ends."""
+        """Release accounts given up after a transient error, but not before their pacing or cap ends."""
         for username in usernames:
-            floor = self._pace_floors.get(username, 0)
+            floor = self._budget_floors.get(username, 0)
             if floor > utc.ts():
                 await self.pool.lock_until(username, self.queue, floor)
             else:
@@ -382,7 +382,7 @@ class QueueClient:
         # Pacing (and caps) hold the account at least this long; a longer lock set by the caller wins.
         floor = self._budget_floor(ctx)
         if floor:
-            self._pace_floors[username] = floor
+            self._budget_floors[username] = floor
             reset_at = max(reset_at, floor)
 
         if reset_at > 0:
