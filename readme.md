@@ -197,16 +197,16 @@ importer but can contain a placeholder. Protect account-import files too.
 
 ## Proxies
 
-Proxy precedence is `API(proxy=...)`, then `TWS_PROXY`, then the account's saved
-proxy. Setting `api.proxy = None` restores the environment/account fallback.
-It does not force a direct connection.
+Proxy precedence is the account's saved proxy, then `API(proxy=...)`, then
+`TWS_PROXY`. Give each account its own static proxy so it always leaves from one
+address; the API proxy and `TWS_PROXY` are the fallback for accounts without
+one. No proxy at all means a direct connection.
 
 ```python
 api = API("accounts.db", proxy="http://user:pass@127.0.0.1:8080")
 ```
 
-To use account-specific proxies, leave both the API override and `TWS_PROXY`
-unset. SOCKS proxies require the optional HTTPX SOCKS dependency:
+SOCKS proxies require the optional HTTPX SOCKS dependency:
 
 ```sh
 python -m pip install "httpx[socks]"
@@ -216,7 +216,9 @@ python -m pip install "httpx[socks]"
 
 | Variable | Purpose |
 | --- | --- |
-| `TWS_PROXY` | Global proxy URL, between the API and account settings in priority. |
+| `TWS_PROXY` | Fallback proxy URL for accounts without their own proxy and without an API proxy. |
+| `TWS_IMPERSONATE` | Browser profile for curl-cffi, e.g. `chrome`. Sends requests with that browser's TLS and HTTP/2 fingerprint and user agent. Unset keeps plain HTTPX. Same as `API(impersonate=...)`. |
+| `TWS_SEARCH_REFUSAL_LOCK_SECONDS` | How long an account stays out of search after X refused a search for it. Default `21600` (6 hours). |
 | `TWS_WAIT_EMAIL_CODE` | Email verification timeout in seconds. Default `30`. |
 | `TWS_RAISE_WHEN_NO_ACCOUNT` | Raise when no account is available. Accepts `true`/`1` or `false`/`0`. Default `false`. |
 

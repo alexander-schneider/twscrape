@@ -150,13 +150,13 @@ async def test_gql_items_stops_on_repeated_search_page(api_mock: API, monkeypatc
 
         async def get(self, url, params=None):
             calls.append(("get", url, params))
-            raise AssertionError("SearchTimeline should use POST")
-
-        async def post(self, url, json=None):
-            calls.append(("post", url, json))
             if not pages:
                 raise AssertionError("unexpected extra pagination request")
             return pages.pop(0)
+
+        async def post(self, url, json=None):
+            calls.append(("post", url, json))
+            raise AssertionError("SearchTimeline should use GET like the x.com web client")
 
     monkeypatch.setattr(api_module, "QueueClient", FakeQueueClient)
 
@@ -169,7 +169,7 @@ async def test_gql_items_stops_on_repeated_search_page(api_mock: API, monkeypatc
 
     assert len(reps) == 1
     assert len(calls) == 2
-    assert all(x[0] == "post" for x in calls)
+    assert all(x[0] == "get" for x in calls)
 
 
 async def test_gql_items_stops_on_repeated_cursor_for_other_timelines(api_mock: API, monkeypatch):
@@ -226,13 +226,13 @@ async def test_gql_items_continues_past_empty_search_pages(api_mock: API, monkey
 
         async def get(self, url, params=None):
             calls.append(("get", url, params))
-            raise AssertionError("SearchTimeline should use POST")
-
-        async def post(self, url, json=None):
-            calls.append(("post", url, json))
             if not pages:
                 raise AssertionError("unexpected extra pagination request")
             return pages.pop(0)
+
+        async def post(self, url, json=None):
+            calls.append(("post", url, json))
+            raise AssertionError("SearchTimeline should use GET like the x.com web client")
 
     monkeypatch.setattr(api_module, "QueueClient", FakeQueueClient)
 
@@ -245,16 +245,12 @@ async def test_gql_items_continues_past_empty_search_pages(api_mock: API, monkey
 
     assert len(reps) == 1
     assert len(calls) == 2
-    assert all(x[0] == "post" for x in calls)
+    assert all(x[0] == "get" for x in calls)
 
 
 @pytest.mark.parametrize(
     ("op", "variables"),
     [
-        (
-            api_module.OP_SearchTimeline,
-            {"rawQuery": "foo", "count": 20, "product": "Latest", "querySource": "typed_query"},
-        ),
         (
             api_module.OP_Followers,
             {"userId": "2244994945", "count": 20, "includePromotedContent": False},
@@ -382,8 +378,8 @@ def mock_search_pages(monkeypatch, pages):
         async def __aexit__(self, *args):
             pass
 
-        async def post(self, url, json):
-            calls.append(json)
+        async def get(self, url, params):
+            calls.append({key: json.loads(value) for key, value in params.items()})
             assert pages, "unexpected extra pagination request"
             return DummyResponse(pages.pop(0))
 

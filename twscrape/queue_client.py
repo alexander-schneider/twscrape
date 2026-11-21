@@ -7,7 +7,7 @@ from urllib.parse import urlparse
 import httpx
 from httpx import AsyncClient, Response
 
-from .account import Account
+from .account import Account, resolve_proxy
 from .accounts_pool import GLOBAL_LOCK_QUEUE, AccountsPool, has_required_cookies
 from .logger import LogOnce, logger
 from .utils import utc
@@ -22,6 +22,19 @@ TRANSPORT_ERROR_RETRY_LIMIT = 3
 TRANSIENT_API_ERROR_RETRY_LIMIT = 3
 TRANSIENT_API_ERROR_COOLDOWN_SECONDS = 60 * 5
 UNKNOWN_API_ERROR_COOLDOWN_SECONDS = 60 * 15
+SEARCH_QUEUE = "SearchTimeline"
+DEFAULT_SEARCH_REFUSAL_LOCK_SECONDS = 6 * 60 * 60
+
+
+def search_refusal_lock_seconds() -> int:
+    """How long an account X refused search for stays out of search (TWS_SEARCH_REFUSAL_LOCK_SECONDS)."""
+    try:
+        return max(
+            60,
+            int(os.getenv("TWS_SEARCH_REFUSAL_LOCK_SECONDS", DEFAULT_SEARCH_REFUSAL_LOCK_SECONDS)),
+        )
+    except ValueError:
+        return DEFAULT_SEARCH_REFUSAL_LOCK_SECONDS
 
 
 class HandledError(Exception): ...
@@ -40,6 +53,14 @@ class UnexpectedApiError(Exception): ...
 
 
 class ServiceUnavailableError(UnexpectedApiError): ...
+
+
+class SearchRefusedError(ServiceUnavailableError):
+    """X refused SearchTimeline for every account tried; each one is quarantined (vladkens/twscrape#367)."""
+
+
+class NotFoundAfterSigningError(AbortReqError):
+    """HTTP 404 again after fresh x-client-transaction-ids."""
 
 
 TRANSIENT_API_ERROR_FRAGMENTS = (
@@ -99,14 +120,13 @@ class XClIdGenStore:
         acc: Account,
         proxy: str | None = None,
         fresh=False,
+        impersonate: str | None = None,
     ) -> XClIdGen:
         username = acc.username
         if username in cls.items and not fresh:
             return cls.items[username]
 
-        proxies = [proxy, os.getenv("TWS_PROXY"), acc.proxy]
-        proxies = [x for x in proxies if x is not None]
-        selected_proxy = proxies[0] if proxies else None
+        selected_proxy = resolve_proxy(acc.proxy, proxy)
 
         tries = 0
         while tries < 3:
@@ -115,6 +135,7 @@ class XClIdGenStore:
                     proxy=selected_proxy,
                     user_agent=acc.user_agent,
                     cookies=acc.cookies,
+                    impersonate=impersonate,
                 )
                 cls.items[username] = clid_gen
                 return clid_gen
@@ -128,11 +149,18 @@ class XClIdGenStore:
 
 
 class Ctx:
-    def __init__(self, acc: Account, clt: AsyncClient, proxy: str | None = None):
+    def __init__(
+        self,
+        acc: Account,
+        clt: AsyncClient,
+        proxy: str | None = None,
+        impersonate: str | None = None,
+    ):
         self.req_count = 0
         self.acc = acc
         self.clt = clt
         self.proxy = proxy
+        self.impersonate = impersonate
         self.failures = {"transport": 0, "loadshed": 0}
 
     async def retry(self, kind: str, limit: int) -> bool:
@@ -161,7 +189,9 @@ class Ctx:
 
         tries = 0
         while tries < 3:
-            gen = await XClIdGenStore.get(self.acc, proxy=self.proxy, fresh=tries > 0)
+            gen = await XClIdGenStore.get(
+                self.acc, proxy=self.proxy, fresh=tries > 0, impersonate=self.impersonate
+            )
             hdr = {"x-client-transaction-id": gen.calc(method, path)}
             rep = await self.clt.request(method, url, params=params, json=json, headers=hdr)
             if rep.status_code != 404:
@@ -171,7 +201,7 @@ class Ctx:
             logger.debug(f"Retrying request with new x-client-transaction-id: {url}")
             await asyncio.sleep(1)
 
-        raise AbortReqError(
+        raise NotFoundAfterSigningError(
             "Failed to get XClIdGen. See: https://github.com/alexander-schneider/twscrape/issues"
         )
 
@@ -214,12 +244,24 @@ def dump_rep(rep: Response):
 
 
 class QueueClient:
-    def __init__(self, pool: AccountsPool, queue: str, debug=False, proxy: str | None = None):
+    def __init__(
+        self,
+        pool: AccountsPool,
+        queue: str,
+        debug=False,
+        proxy: str | None = None,
+        impersonate: str | None = None,
+    ):
         self.pool = pool
         self.queue = queue
         self.debug = debug
         self.ctx: Ctx | None = None
         self.proxy = proxy
+        self.impersonate = impersonate
+
+    def _ctx_for(self, acc: Account) -> "Ctx":
+        clt = acc.make_client(proxy=self.proxy, impersonate=self.impersonate)
+        return Ctx(acc, clt, proxy=self.proxy, impersonate=self.impersonate)
 
     async def __aenter__(self):
         await self._get_ctx()
@@ -262,8 +304,7 @@ class QueueClient:
         if acc is None:
             return None
 
-        clt = acc.make_client(proxy=self.proxy)
-        self.ctx = Ctx(acc, clt, proxy=self.proxy)
+        self.ctx = self._ctx_for(acc)
         return self.ctx
 
     async def _move_to_free_account(self) -> bool:
@@ -273,8 +314,26 @@ class QueueClient:
             return False
 
         await self._close_ctx(utc.ts() + TRANSIENT_API_ERROR_COOLDOWN_SECONDS)
-        self.ctx = Ctx(acc, acc.make_client(proxy=self.proxy), proxy=self.proxy)
+        self.ctx = self._ctx_for(acc)
         return True
+
+    async def _quarantine_refused_search(self, reason: str) -> bool:
+        """Keep the refused account out of search for hours and continue with a free account, if any."""
+        lock_seconds = search_refusal_lock_seconds()
+        username = self.ctx.acc.username if self.ctx else "<unknown>"
+        logger.warning(
+            f"Search refused for {username} ({reason}); no searches with it for {lock_seconds}s"
+        )
+        await self._close_ctx(utc.ts() + lock_seconds)
+        acc = await self.pool.get_for_queue(self.queue)
+        if acc is None:
+            return False
+        self.ctx = self._ctx_for(acc)
+        return True
+
+    @staticmethod
+    def _is_search_refusal(err_msg: str) -> bool:
+        return "(-1) Internal server error" in err_msg
 
     async def _check_rep(self, rep: Response) -> None:
         """
@@ -422,6 +481,11 @@ class QueueClient:
                 )
                 raise HandledError()
 
+            if self.queue == SEARCH_QUEUE and self._is_search_refusal(err_msg):
+                raise SearchRefusedError(
+                    f"Transient X API error ({rep.status_code}) for {self.queue}: {err_msg}"
+                )
+
             if is_transient_api_error(err_msg):
                 logger.warning(f"Transient X API error detected: {log_msg}")
                 raise ServiceUnavailableError(
@@ -454,7 +518,7 @@ class QueueClient:
         params: ReqParams = None,
         json: Any = None,
     ) -> Response | None:
-        unknown_retry, transient_api_retry = 0, 0
+        unknown_retry, transient_api_retry, refused = 0, 0, 0
         held: list[str] = []
 
         while True:
@@ -477,6 +541,20 @@ class QueueClient:
                 ctx.reset_failures()
                 unknown_retry, transient_api_retry = 0, 0
                 return rep
+            except NotFoundAfterSigningError as e:
+                if self.queue != SEARCH_QUEUE:
+                    raise
+                refused += 1
+                if not await self._quarantine_refused_search("HTTP 404 after fresh signing") or (
+                    refused >= TRANSIENT_API_ERROR_RETRY_LIMIT
+                ):
+                    raise SearchRefusedError(f"X refused {self.queue} with HTTP 404: {e}") from e
+            except SearchRefusedError:
+                refused += 1
+                if not await self._quarantine_refused_search("(-1) Internal server error") or (
+                    refused >= TRANSIENT_API_ERROR_RETRY_LIMIT
+                ):
+                    raise
             except AbortReqError:
                 raise
             except ApiFeatureUpdateRequiredError:

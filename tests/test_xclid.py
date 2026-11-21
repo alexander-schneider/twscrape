@@ -400,6 +400,7 @@ async def test_xclid_create_passes_browser_client_metadata(monkeypatch):
         proxy="http://proxy.local",
         user_agent="ua",
         cookies={"auth_token": "token"},
+        impersonate="chrome",
     )
 
     assert calls == [
@@ -407,6 +408,7 @@ async def test_xclid_create_passes_browser_client_metadata(monkeypatch):
             "proxy": "http://proxy.local",
             "user_agent": "ua",
             "cookies": {"auth_token": "token"},
+            "impersonate": "chrome",
         }
     ]
 

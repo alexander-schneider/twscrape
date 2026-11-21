@@ -83,6 +83,7 @@ class API:
         raise_when_no_account=False,
         wait_timeout: float | None = None,
         wait_interval: float = 5.0,
+        impersonate: str | None = None,
     ):
         if isinstance(pool, AccountsPool):
             self.pool = pool
@@ -101,6 +102,7 @@ class API:
             )
 
         self.proxy = proxy
+        self.impersonate = impersonate
         self.debug = debug
         if self.debug:
             set_log_level("DEBUG")
@@ -189,7 +191,9 @@ class API:
         seen_pages: set[tuple[str, ...]] = set()
         empty_pages = 0
 
-        async with QueueClient(self.pool, queue, self.debug, proxy=self.proxy) as client:
+        async with QueueClient(
+            self.pool, queue, self.debug, proxy=self.proxy, impersonate=self.impersonate
+        ) as client:
             while active:
                 params = {"variables": kv, "features": ft}
                 if cur is not None:
@@ -199,7 +203,8 @@ class API:
                 if queue in ("UserMedia",):
                     params["fieldToggles"] = {"withArticlePlainText": False}
 
-                if queue in ("SearchTimeline", "Followers", "UserTweetsAndReplies"):
+                # SearchTimeline goes as GET like the x.com web client (vladkens/twscrape#368).
+                if queue in ("Followers", "UserTweetsAndReplies"):
                     rep = await client.post(f"{GQL_URL}/{op}", json=params)
                 else:
                     rep = await client.get(f"{GQL_URL}/{op}", params=encode_params(params))
@@ -246,7 +251,9 @@ class API:
     ):
         ft = ft or {}
         queue = op.split("/")[-1]
-        async with QueueClient(self.pool, queue, self.debug, proxy=self.proxy) as client:
+        async with QueueClient(
+            self.pool, queue, self.debug, proxy=self.proxy, impersonate=self.impersonate
+        ) as client:
             params = {"variables": {**kv}, "features": {**GQL_FEATURES, **ft}}
             return await client.get(f"{gql_url}/{op}", params=encode_params(params))
 

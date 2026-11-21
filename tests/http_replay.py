@@ -103,8 +103,8 @@ class PipelineReplay:
         self.real_sleep = asyncio.sleep
         make_client = Account.make_client
 
-        def tracked_client(account, proxy=None):
-            client = make_client(account, proxy=proxy)
+        def tracked_client(account, proxy=None, impersonate=None):
+            client = make_client(account, proxy=proxy, impersonate=impersonate)
             self.clients.append(client)
             return client
 
@@ -155,7 +155,7 @@ class PipelineReplay:
                 self.signatures.append({"method": method, "path": path})
                 return "offline-signature"
 
-        async def signer(_cls, account, proxy=None, fresh=False):
+        async def signer(_cls, account, proxy=None, fresh=False, impersonate=None):
             return Signer()
 
         monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", http_transport)

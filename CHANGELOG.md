@@ -1,5 +1,42 @@
 # Changelog
 
+## v0.22.0 - 2026-11-21
+
+X stopped serving search to every account of a production pool on 2026-11-21
+(the first six on 2026-11-05). The accounts stayed limited, and the 5-minute
+hold sent each of them about 400 more refused searches in two hours. These
+changes make each account look like one browser on one connection and stop
+asking X for search once it refused an account.
+
+### Changed
+
+- An account's own `proxy` now wins over the API `proxy` and `TWS_PROXY`, for
+  API requests and for the x-client-transaction-id page fetch. Before, a
+  shared `TWS_PROXY` overrode every account, so all accounts left through one
+  gateway. Accounts without their own proxy still use the API proxy, then
+  `TWS_PROXY`.
+- SearchTimeline is sent as GET, like the x.com web client, instead of POST.
+  Upstream declined the POST route as easier to detect
+  ([#368](https://github.com/vladkens/twscrape/pull/368)).
+- A refused search quarantines the account for search: HTTP 200 with
+  `(-1) Internal server error` and no data, or HTTP 404 after three fresh
+  x-client-transaction-ids. The account gets a SearchTimeline lock for
+  `TWS_SEARCH_REFUSAL_LOCK_SECONDS` (default 6 hours) instead of 5 minutes and
+  is not released when every account fails. The request moves to a free
+  account; without one, or after three refused accounts, it raises
+  `SearchRefusedError` (a `ServiceUnavailableError`). Each refused account is
+  asked once per request. Other transient errors keep their behavior.
+
+### Added
+
+- Optional browser fingerprint: `API(impersonate="chrome")` or
+  `TWS_IMPERSONATE=chrome` sends requests through curl-cffi with that browser's
+  TLS and HTTP/2 fingerprint while twscrape keeps its httpx client. The browser
+  profile sets the user agent and client hints; the stored account user agent
+  is not sent. Selectively adapts the idea of upstream
+  [#363](https://github.com/vladkens/twscrape/pull/363). New dependency:
+  `curl-cffi>=0.16.3`.
+
 ## v0.21.3 - 2026-11-09
 
 ### Fixed

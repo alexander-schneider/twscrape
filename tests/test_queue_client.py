@@ -8,8 +8,10 @@ from pytest_httpx import HTTPXMock
 import twscrape.queue_client as queue_client_module
 from twscrape.accounts_pool import GLOBAL_LOCK_QUEUE, AccountsPool
 from twscrape.queue_client import (
+    AbortReqError,
     ApiFeatureUpdateRequiredError,
     QueueClient,
+    SearchRefusedError,
     ServiceUnavailableError,
     UnexpectedApiError,
     XClIdGenStore,
@@ -89,7 +91,7 @@ async def test_xclid_generation_uses_account_metadata(
         def calc(*args, **kwargs):
             return "mocked-clid"
 
-    async def mock_get(cls, acc, proxy=None, fresh=False):
+    async def mock_get(cls, acc, proxy=None, fresh=False, impersonate=None):
         calls.append((acc.username, proxy, fresh))
         return LocalClIdGenMock()
 
@@ -127,7 +129,7 @@ async def test_xclid_account_error_keeps_account_active_and_rotates(
 ):
     pool, client = client_fixture
 
-    async def fake_get(cls, acc, proxy=None, fresh=False):
+    async def fake_get(cls, acc, proxy=None, fresh=False, impersonate=None):
         if acc.username == "user1":
             raise XClIdAccountError("Logged-out X web app")
         return type("Gen", (), {"calc": lambda self, *args: "clid"})()
@@ -149,7 +151,7 @@ async def test_xclid_parse_error_aborts_without_changing_account_state(
 ):
     pool, client = client_fixture
 
-    async def fake_get(cls, acc, proxy=None, fresh=False):
+    async def fake_get(cls, acc, proxy=None, fresh=False, impersonate=None):
         raise XClIdParseError("Signing script not found")
 
     monkeypatch.setattr(XClIdGenStore, "get", classmethod(fake_get))
@@ -520,7 +522,7 @@ async def test_transient_x_api_error_moves_to_free_account(
 
     httpx_mock.add_response(
         url=URL,
-        json={"errors": [{"code": -1, "message": "Internal server error"}]},
+        json={"errors": [{"code": -1, "message": "ServiceUnavailable: Unspecified"}]},
         status_code=200,
     )
     httpx_mock.add_response(url=URL, json={"foo": "ok"}, status_code=200)
@@ -538,7 +540,6 @@ async def test_transient_x_api_error_moves_to_free_account(
 @pytest.mark.parametrize(
     "error",
     [
-        {"code": -1, "message": "Internal server error"},
         {"code": -1, "message": "Dependency: Unspecified"},
         {"code": -1, "message": "DeadlineExceeded: Unspecified"},
         {"code": 29, "message": "Timeout: Unspecified"},
@@ -686,3 +687,105 @@ async def test_deadline_preserves_nonempty_direct_data(
     assert rep is not None
     assert rep.json() == payload
     assert len(httpx_mock.get_requests()) == 1
+
+
+async def _search_lock_hours(pool: AccountsPool) -> dict[str, float]:
+    now = utc.now()
+    return {
+        acc.username: round((acc.locks["SearchTimeline"] - now).total_seconds() / 3600, 1)
+        for acc in await pool.get_all()
+        if acc.locks.get("SearchTimeline") is not None
+    }
+
+
+REFUSED = {
+    "data": {"search_by_raw_query": {"search_timeline": {}}},
+    "errors": [{"code": -1, "message": "Internal server error"}],
+}
+
+
+async def test_refused_search_quarantines_the_account_and_moves_on(
+    httpx_mock: HTTPXMock, client_fixture: CF, monkeypatch
+):
+    """X refused search for an account (vladkens/twscrape#367): it stays out of search for hours, not 5 minutes,
+    and the request goes on with the next account."""
+    pool, client = client_fixture
+    monkeypatch.setattr("twscrape.queue_client.asyncio.sleep", _mock_sleep)
+    await client.__aenter__()
+
+    httpx_mock.add_response(url=URL, json=REFUSED, status_code=200)
+    httpx_mock.add_response(url=URL, json={"foo": "ok"}, status_code=200)
+
+    rep = await client.get(URL)
+
+    assert rep is not None and getattr(rep, "__username", None) == "user2"
+    locks = await _search_lock_hours(pool)
+    assert locks["user1"] == 6.0
+    assert locks["user2"] <= 0.25  # the normal in-use lock
+
+
+async def test_search_refused_for_every_account_stops_without_retrying_them(
+    httpx_mock: HTTPXMock, client_fixture: CF, monkeypatch
+):
+    """All accounts refused (2026-11-21): one request per account, then a typed error; the quarantines stay."""
+    pool, client = client_fixture
+    monkeypatch.setattr("twscrape.queue_client.asyncio.sleep", _mock_sleep)
+    await client.__aenter__()
+
+    for _ in range(2):
+        httpx_mock.add_response(url=URL, json=REFUSED, status_code=200)
+
+    with pytest.raises(SearchRefusedError, match="Internal server error"):
+        await client.get(URL)
+
+    assert [r.headers["x-csrf-token"] for r in httpx_mock.get_requests()] == ["csrf1", "csrf2"]
+    assert await _search_lock_hours(pool) == {"user1": 6.0, "user2": 6.0}
+    assert issubclass(SearchRefusedError, ServiceUnavailableError)
+
+
+async def test_search_404_after_fresh_signing_is_a_refusal(
+    httpx_mock: HTTPXMock, client_fixture: CF, monkeypatch
+):
+    """A limited account gets HTTP 404 on GET SearchTimeline even with a fresh x-client-transaction-id; it is
+    quarantined like a refused search instead of failing the request (vladkens/twscrape#367, #368)."""
+    pool, client = client_fixture
+    monkeypatch.setattr("twscrape.queue_client.asyncio.sleep", _mock_sleep)
+    await client.__aenter__()
+
+    for _ in range(3):
+        httpx_mock.add_response(url=URL, status_code=404, text="")
+    httpx_mock.add_response(url=URL, json={"foo": "ok"}, status_code=200)
+
+    rep = await client.get(URL)
+
+    assert rep is not None and getattr(rep, "__username", None) == "user2"
+    assert [r.headers["x-csrf-token"] for r in httpx_mock.get_requests()] == ["csrf1"] * 3 + [
+        "csrf2"
+    ]
+    assert (await _search_lock_hours(pool))["user1"] == 6.0
+
+
+async def test_search_refusal_lock_is_configurable(
+    httpx_mock: HTTPXMock, client_fixture: CF, monkeypatch
+):
+    pool, client = client_fixture
+    monkeypatch.setattr("twscrape.queue_client.asyncio.sleep", _mock_sleep)
+    monkeypatch.setenv("TWS_SEARCH_REFUSAL_LOCK_SECONDS", str(24 * 3600))
+    await client.__aenter__()
+    httpx_mock.add_response(url=URL, json=REFUSED, status_code=200)
+    httpx_mock.add_response(url=URL, json={"foo": "ok"}, status_code=200)
+
+    await client.get(URL)
+
+    assert (await _search_lock_hours(pool))["user1"] == 24.0
+
+
+async def test_404_on_other_queues_still_aborts(httpx_mock: HTTPXMock, pool_mock: AccountsPool):
+    await pool_mock.add_account("user1", "p", "e", "ep", cookies="auth_token=t1; ct0=c1")
+    client = QueueClient(pool_mock, "TweetDetail")
+    for _ in range(3):
+        httpx_mock.add_response(url=URL, status_code=404, text="")
+
+    async with client:
+        with pytest.raises(AbortReqError):
+            await client.get(URL)

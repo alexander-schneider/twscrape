@@ -30,9 +30,13 @@ def _make_client(
     proxy: str | None = None,
     user_agent: str | None = None,
     cookies: dict[str, str] | None = None,
+    impersonate: str | None = None,
 ) -> httpx.AsyncClient:
+    from .account import make_transport, resolve_impersonate
+
     headers = {"user-agent": user_agent or UserAgent().chrome}
-    client = httpx.AsyncClient(headers=headers, follow_redirects=True, proxy=proxy)
+    transport = make_transport(proxy, resolve_impersonate(impersonate))
+    client = httpx.AsyncClient(headers=headers, follow_redirects=True, transport=transport)
     if cookies:
         for key, value in cookies.items():
             client.cookies.jar.set_cookie(_make_secure_x_cookie(key, value))
@@ -414,9 +418,12 @@ class XClIdGen:
         proxy: str | None = None,
         user_agent: str | None = None,
         cookies: dict[str, str] | None = None,
+        impersonate: str | None = None,
     ) -> "XClIdGen":
         owns_client = clt is None
-        clt = clt or _make_client(proxy=proxy, user_agent=user_agent, cookies=cookies)
+        clt = clt or _make_client(
+            proxy=proxy, user_agent=user_agent, cookies=cookies, impersonate=impersonate
+        )
         last_error: Exception | None = None
 
         try:
