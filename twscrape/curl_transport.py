@@ -12,7 +12,7 @@ import httpx
 from curl_cffi.requests import AsyncSession
 from curl_cffi.requests.errors import RequestsError
 
-from .redaction import redact_credentials
+from .redaction import raise_without_context, redact_credentials
 
 # Headers the browser profile sets; httpx defaults and stored account values would contradict it.
 BROWSER_PROFILE_HEADERS = {
@@ -110,8 +110,8 @@ class CurlTransport(httpx.AsyncBaseTransport):
                 content=rep.content,
                 request=request,
             )
-        # Raised outside the except block: __context__ would otherwise keep the original libcurl error.
-        raise httpx.TransportError(message)
+        # __context__ would otherwise keep the original libcurl error (on Python 3.10 even after the except block).
+        raise_without_context(httpx.TransportError(message))
 
     async def aclose(self) -> None:
         await self._session.close()

@@ -8,7 +8,7 @@ from typing import Literal
 from httpx import AsyncBaseTransport, AsyncClient, AsyncHTTPTransport, Request, Response
 
 from .models import JSONTrait
-from .redaction import redacted_error
+from .redaction import raise_without_context, redacted_error
 from .utils import utc
 
 
@@ -39,7 +39,7 @@ class RedactingTransport(AsyncBaseTransport):
             clean = redacted_error(error, self._proxy)
             if clean is None:
                 raise
-        raise clean
+        raise_without_context(clean)
 
     async def aclose(self) -> None:
         await self._transport.aclose()
@@ -59,7 +59,7 @@ def make_transport(proxy: str | None, impersonate: str | None) -> AsyncBaseTrans
         clean = redacted_error(error, proxy)
         if clean is None:
             raise
-    raise clean
+    raise_without_context(clean)
 
 
 TOKEN = "Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA"

@@ -5,6 +5,7 @@ libcurl and httpx put the proxy URL into some error messages (for example "Unsup
 """
 
 import re
+from typing import NoReturn
 from urllib.parse import unquote, urlsplit
 
 REDACTED = "***"
@@ -79,6 +80,22 @@ def redact_credentials(text: str, proxy: str | None = None) -> str:
     return clean
 
 
+def raise_without_context(error: BaseException) -> NoReturn:
+    """Raise `error` with no __context__, whatever exception the interpreter still counts as handled.
+
+    A raise after an except block is not enough: on Python 3.10 the exception a library handled inside an
+    awaited coroutine (curl-cffi's `except CurlError`) stays in sys.exc_info() in the caller, and `raise` chains
+    it as __context__, credentials included. A bare re-raise inside the except below keeps __context__ as set.
+    An awaiting caller that is itself handling an exception may still get that exception attached by the
+    interpreter on the way up; that is the caller's own error, not the transport's.
+    """
+    try:
+        raise error
+    except BaseException as raised:
+        raised.__context__ = None
+        raise
+
+
 def _chain(error: BaseException) -> list[BaseException]:
     """The error and everything chained to it: __cause__, __context__ and exception group members."""
     found: list[BaseException] = []
@@ -105,8 +122,8 @@ def redacted_error(error: BaseException, proxy: str | None) -> BaseException | N
     """A copy of `error` without credentials, or None when neither it nor its chain carries any.
 
     The copy keeps the exception type where it can be built from a message, so callers keep handling it the same
-    way. It has no __cause__ or __context__, because the originals still carry the credentials; the caller must
-    raise it outside an except block, or Python sets __context__ again.
+    way. It has no __cause__ or __context__, because the originals still carry the credentials; the caller raises
+    it with `raise_without_context`, or Python sets __context__ again.
     """
     if not _carries_credentials(error, proxy):
         return None
