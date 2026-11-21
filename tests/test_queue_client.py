@@ -811,10 +811,16 @@ async def test_search_refusal_lock_is_configurable(
     assert await _refusal_lock_hours(httpx_mock, pool, client, times=3) == [2.0, 4.0, 5.0]
 
 
+async def _free_both_accounts(pool: AccountsPool) -> None:
+    """Lift the search locks only; reset_locks would also end the refusal streak."""
+    for username in ("user1", "user2"):
+        await pool.unlock(username, "SearchTimeline")
+
+
 async def _refuse_user1(httpx_mock: HTTPXMock, pool: AccountsPool, client: QueueClient) -> float:
     """One request whose search user1 refuses (confirmed by the control read); user2 answers. user1's lock."""
     await client._close_ctx()
-    await pool.reset_locks()
+    await _free_both_accounts(pool)
     httpx_mock.add_response(url=URL, json=REFUSED, status_code=200)
     httpx_mock.add_response(url=CONTROL_URL, json=CONTROL_OK, status_code=200)
     httpx_mock.add_response(url=URL, json={"foo": "ok"}, status_code=200)
@@ -831,7 +837,7 @@ async def _refusal_lock_hours(
 
 async def _search_user1(httpx_mock: HTTPXMock, pool: AccountsPool, client: QueueClient, body):
     await client._close_ctx()
-    await pool.reset_locks()
+    await _free_both_accounts(pool)
     httpx_mock.add_response(url=URL, json=body, status_code=200)
     rep = await client.get(URL)
     assert rep is not None and getattr(rep, "__username") == "user1"
@@ -911,6 +917,32 @@ async def test_saving_a_loaded_account_keeps_its_refusal_streak(
     assert await _refuse_user1(httpx_mock, pool, client) == 1.0
     await client._close_ctx()
     assert (await pool.get("user1")).stats == {"SearchTimeline": 7}
+
+
+@pytest.mark.parametrize("via_cli", [False, True])
+async def test_reset_locks_also_ends_the_refusal_streak(
+    via_cli, httpx_mock: HTTPXMock, client_fixture: CF, monkeypatch
+):
+    """An operator who puts an account back with `twscrape reset_locks` gives it a fresh start: its next refusal
+    locks for 30 minutes, not the next step."""
+    from types import SimpleNamespace
+
+    import twscrape.cli as cli
+
+    pool, client = client_fixture
+    monkeypatch.setattr("twscrape.queue_client.asyncio.sleep", _mock_sleep)
+    monkeypatch.delenv("TWS_SEARCH_REFUSAL_FIRST_LOCK_SECONDS", raising=False)
+    monkeypatch.delenv("TWS_SEARCH_REFUSAL_LOCK_SECONDS", raising=False)
+    for _ in range(2):
+        await pool.record_refusal("user1", "SearchTimeline")
+
+    if via_cli:
+        await cli.main(SimpleNamespace(command="reset_locks", debug=False, db=str(pool._db_file)))
+    else:
+        await pool.reset_locks()
+
+    assert await _refuse_user1(httpx_mock, pool, client) == 0.5
+    await client._close_ctx()
 
 
 async def test_search_503_with_internal_server_error_stays_transient(
