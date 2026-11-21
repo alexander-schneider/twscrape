@@ -52,8 +52,9 @@ def proxy_parses_cleanly(proxy: str | None) -> bool:
     userinfo = _userinfo(proxy)
     if userinfo is None or proxy is None:
         return True
-    parts = urlsplit(proxy)
     try:
+        # urlsplit() itself refuses some netlocs (NFKC-normalised delimiters) with a ValueError that quotes them.
+        parts = urlsplit(proxy)
         parts.port
     except ValueError:
         return False

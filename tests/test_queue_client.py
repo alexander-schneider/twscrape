@@ -973,6 +973,9 @@ async def test_search_503_with_internal_server_error_stays_transient(
         (502, {"content": b""}),
         (503, {"json": REFUSED}),
         (500, {"json": {"errors": [{"code": 999, "message": "Something new"}]}}),
+        # Not decodable as UTF-8, and a rate-limit header that is not a number (review round 3 of v0.22.2).
+        (503, {"content": "Serveur indisponible, réessayez".encode("latin-1")}),
+        (503, {"text": "busy", "headers": {"x-rate-limit-remaining": "", "x-rate-limit-reset": "soon"}}),
     ],
 )
 async def test_every_search_5xx_is_transient_whatever_the_body(
@@ -1005,6 +1008,11 @@ CONTROLS_WITHOUT_USER_DATA = [
     {"json": {"data": []}},
     {"json": None},
     {"text": "{not json"},
+    # Not a user id: zero, negative or empty (review round 3 of v0.22.2).
+    {"json": {"data": {"user": {"result": {"rest_id": "0"}}}}},
+    {"json": {"data": {"user": {"result": {"rest_id": 0}}}}},
+    {"json": {"data": {"user": {"result": {"rest_id": "-1"}}}}},
+    {"json": {"data": {"user": {"result": {"rest_id": "abc"}}}}},
 ]
 
 

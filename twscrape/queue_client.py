@@ -123,6 +123,29 @@ def has_data(rep: Response, res: Any) -> bool:
     return any(value not in (None, {}, []) and present(value) for value in data.values())
 
 
+def _int_header(rep: Response, name: str) -> int:
+    """An integer response header, or -1 when it is missing or not a number."""
+    try:
+        return int(rep.headers.get(name, -1))
+    except (TypeError, ValueError):
+        return -1
+
+
+def _outage_detail(rep: Response) -> str:
+    """The GraphQL errors of a 5xx answer when it has readable ones, otherwise only its status."""
+    try:
+        payload = rep.json()
+    except ValueError:
+        return f"HTTP {rep.status_code}"
+    items = payload.get("errors") if isinstance(payload, dict) else None
+    messages = [
+        f"({item.get('code', -1)}) {item['message']}"
+        for item in items or ()
+        if isinstance(item, dict) and isinstance(item.get("message"), str)
+    ]
+    return "; ".join(dict.fromkeys(messages)) or f"HTTP {rep.status_code}"
+
+
 def has_user_data(rep: Response) -> bool:
     """A UserByScreenName answer with a user id (data.user.result.rest_id), not only HTTP 200."""
     if rep.status_code != 200:
@@ -136,7 +159,10 @@ def has_user_data(rep: Response) -> bool:
     user = data.get("user") if isinstance(data, dict) else None
     result = user.get("result") if isinstance(user, dict) else None
     rest_id = result.get("rest_id") if isinstance(result, dict) else None
-    return isinstance(rest_id, (str, int)) and not isinstance(rest_id, bool) and bool(str(rest_id))
+    if isinstance(rest_id, bool) or not isinstance(rest_id, (str, int)):
+        return False
+    # A user id is a positive integer, also when X sends it as a string.
+    return str(rest_id).isdigit() and int(rest_id) > 0
 
 
 def has_error(errors: list[str], prefix: str) -> bool:
@@ -434,13 +460,24 @@ class QueueClient:
         if self.debug:
             dump_rep(rep)
 
+        # An X outage, whatever the body (JSON errors, plain text, undecodable bytes or nothing) and whatever the
+        # headers: never an account lock or a refusal. Checked before the body or the headers are parsed.
+        if 500 <= rep.status_code < 600:
+            detail = _outage_detail(rep)
+            logger.warning(
+                f"Transient X API error detected: {rep.status_code:3d} - {req_id(rep)} - {detail}"
+            )
+            raise ServiceUnavailableError(
+                f"Transient X API error ({rep.status_code}) for {self.queue}: {detail}"
+            )
+
         try:
             res = rep.json()
-        except json.JSONDecodeError:
+        except ValueError:  # JSONDecodeError, and UnicodeDecodeError for a body that is not UTF-8
             res: Any = {"_raw": rep.text}
 
-        limit_remaining = int(rep.headers.get("x-rate-limit-remaining", -1))
-        limit_reset = int(rep.headers.get("x-rate-limit-reset", -1))
+        limit_remaining = _int_header(rep, "x-rate-limit-remaining")
+        limit_reset = _int_header(rep, "x-rate-limit-reset")
         rate_limited_429 = rep.status_code == 429
         # limit_max = int(rep.headers.get("x-rate-limit-limit", -1))
 
@@ -466,14 +503,6 @@ class QueueClient:
 
         log_msg = f"{rep.status_code:3d} - {req_id(rep)} - {err_msg}"
         logger.trace(log_msg)
-
-        # An X outage, whatever the body (JSON errors, plain text or nothing): never an account lock or a refusal.
-        if 500 <= rep.status_code < 600:
-            logger.warning(f"Transient X API error detected: {log_msg}")
-            detail = err_msg if errors else f"HTTP {rep.status_code}"
-            raise ServiceUnavailableError(
-                f"Transient X API error ({rep.status_code}) for {self.queue}: {detail}"
-            )
 
         if malformed_errors:
             logger.error(f"API malformed errors payload: {log_msg}")
