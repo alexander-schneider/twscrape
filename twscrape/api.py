@@ -1,5 +1,5 @@
 from contextlib import aclosing
-from typing import Literal
+from typing import Callable, Literal
 
 from httpx import Response
 
@@ -250,11 +250,15 @@ class API:
         cursor_type="Bottom",
         features: dict | None = None,
         max_pages: int | None = None,
+        on_page: Callable[[], None] | None = None,
     ):
         """`features` replaces the shared GQL_FEATURES for operations that send their own exact set.
 
         `max_pages` bounds the HTTP requests of this call: every page request counts, also the empty, cursor-only
         pages followed on their own. None pages until the end, as before.
+
+        `on_page` is called once for every page X answered, also an empty or cursor-only one that is followed
+        without being yielded, before the next request.
         """
         if max_pages is not None and max_pages < 1:
             raise ValueError(f"max_pages must be 1 or more, or None; got {max_pages}")
@@ -288,6 +292,8 @@ class API:
                     rep = await client.get(f"{GQL_URL}/{op}", params=encode_params(params))
                 if rep is None:
                     return
+                if on_page is not None:
+                    on_page()
 
                 obj = rep.json()
                 els = self._get_entries(obj)
@@ -337,8 +343,16 @@ class API:
 
     # search
 
-    async def search_raw(self, q: str, limit=-1, kv: KV = None, max_pages: int | None = None):
-        """SearchTimeline pages. `max_pages` caps the requests of this call (e.g. 1 while search is paced)."""
+    async def search_raw(
+        self,
+        q: str,
+        limit=-1,
+        kv: KV = None,
+        max_pages: int | None = None,
+        on_page: Callable[[], None] | None = None,
+    ):
+        """SearchTimeline pages. `max_pages` caps the requests of this call (e.g. 1 while search is paced);
+        `on_page` is called for every page X answered (see _gql_items)."""
         op = OP_SearchTimeline
         extra = {"product": "Latest", **(kv or {})}
         product = extra.pop("product")
@@ -357,14 +371,26 @@ class API:
             **extra,
         }
         gen_items = self._gql_items(
-            op, kv, limit=limit, features=SEARCH_TIMELINE_FEATURES, max_pages=max_pages
+            op,
+            kv,
+            limit=limit,
+            features=SEARCH_TIMELINE_FEATURES,
+            max_pages=max_pages,
+            on_page=on_page,
         )
         async with aclosing(gen_items) as gen:
             async for x in gen:
                 yield x
 
-    async def search(self, q: str, limit=-1, kv: KV = None, max_pages: int | None = None):
-        raw = self.search_raw(q, kv=kv, max_pages=max_pages)
+    async def search(
+        self,
+        q: str,
+        limit=-1,
+        kv: KV = None,
+        max_pages: int | None = None,
+        on_page: Callable[[], None] | None = None,
+    ):
+        raw = self.search_raw(q, kv=kv, max_pages=max_pages, on_page=on_page)
         async for x in self._iter_unique(raw, parse_tweets, limit):
             yield x
 

@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.23.2 - 2026-11-21
+
+- `API.search`, `API.search_raw` and `_gql_items` take an optional `on_page` callback, called once for every page
+  X answered, also an empty or cursor-only page that is followed without being yielded. Without it nothing
+  changes.
+
 ## v0.23.1 - 2026-11-21
 
 - A cancellation while an account's HTTP client closes (for example a caller's deadline around a paced search)

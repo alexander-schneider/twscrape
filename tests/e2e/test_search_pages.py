@@ -69,3 +69,30 @@ async def test_max_pages_must_be_positive(pipeline, max_pages):
     _, api = pipeline
     with pytest.raises(ValueError, match="max_pages"):
         [item async for item in api.search("example", max_pages=max_pages)]
+
+
+@pytest.mark.parametrize("raw", [False, True])
+async def test_on_page_is_called_for_every_answer_also_a_cursor_only_one(pipeline, raw):
+    """api.adanos.org#3565 council round 6: a caller that stops on a cap needs to know that X answered, also when
+    the answer held only a cursor, which _gql_items follows on its own without yielding it."""
+    wire, api = pipeline
+    wire.enqueue(page(cursor="c1"), page(cursor="c2"), page(tweet(941)))
+    answers: list[int] = []
+
+    def on_page():
+        answers.append(len(wire.requests))
+
+    if raw:
+        [rep async for rep in api.search_raw("example", max_pages=3, on_page=on_page)]
+    else:
+        assert [item.id async for item in api.search("example", max_pages=3, on_page=on_page)] == [941]
+
+    assert answers == [1, 2, 3]
+
+
+async def test_without_on_page_the_search_is_unchanged(pipeline):
+    wire, api = pipeline
+    wire.enqueue(page(cursor="c1"), page(tweet(941)))
+
+    assert [item.id async for item in api.search("example")] == [941]
+    assert len(wire.requests) == 2
