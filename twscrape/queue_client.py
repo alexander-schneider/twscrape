@@ -112,6 +112,19 @@ def has_data(rep: Response, res: Any) -> bool:
     return any(value not in (None, {}, []) and present(value) for value in data.values())
 
 
+def has_user_data(rep: Response) -> bool:
+    """A UserByScreenName answer with a user id (data.user.result.rest_id), not only HTTP 200."""
+    if rep.status_code != 200:
+        return False
+    try:
+        res = rep.json()
+    except ValueError:
+        return False
+    user = res.get("data", {}).get("user") if isinstance(res, dict) else None
+    result = user.get("result") if isinstance(user, dict) else None
+    return isinstance(result, dict) and bool(result.get("rest_id"))
+
+
 def has_error(errors: list[str], prefix: str) -> bool:
     return any(error.startswith(prefix) for error in errors)
 
@@ -364,7 +377,22 @@ class QueueClient:
                 f"Signed control read failed for {ctx.acc.username}: {type(e).__name__}: {e}"
             )
             return False
-        return rep.status_code == 200
+        return has_user_data(rep)
+
+    async def _search_limit_confirmed(self, reason: str) -> bool:
+        """A refused search counts as a search limit only when the signed control read returns user data.
+
+        Otherwise the account cools down for SIGNING_FAILURE_COOLDOWN_SECONDS and the caller fails the request.
+        """
+        if await self._signed_control_succeeds():
+            return True
+        username = self.ctx.acc.username if self.ctx else "<unknown>"
+        logger.warning(
+            f"Search refused for {username} ({reason}) and the signed control read returned no user data: "
+            f"not a search limit. Cooling the account for {SIGNING_FAILURE_COOLDOWN_SECONDS}s"
+        )
+        await self._close_ctx(utc.ts() + SIGNING_FAILURE_COOLDOWN_SECONDS)
+        return False
 
     @staticmethod
     def _is_search_refusal(err_msg: str) -> bool:
@@ -516,7 +544,12 @@ class QueueClient:
                 )
                 raise HandledError()
 
-            if self.queue == SEARCH_QUEUE and self._is_search_refusal(err_msg):
+            # Only an HTTP 200 answer without timeline data is a refusal; a 5xx stays transient.
+            if (
+                self.queue == SEARCH_QUEUE
+                and rep.status_code == 200
+                and self._is_search_refusal(err_msg)
+            ):
                 raise SearchRefusedError(
                     f"Transient X API error ({rep.status_code}) for {self.queue}: {err_msg}"
                 )
@@ -579,19 +612,16 @@ class QueueClient:
             except NotFoundAfterSigningError as e:
                 if self.queue != SEARCH_QUEUE:
                     raise
-                if not await self._signed_control_succeeds():
-                    logger.warning(
-                        f"Search 404 for {ctx.acc.username} and the signed control read failed too: not a "
-                        f"search limit. Cooling the account for {SIGNING_FAILURE_COOLDOWN_SECONDS}s"
-                    )
-                    await self._close_ctx(utc.ts() + SIGNING_FAILURE_COOLDOWN_SECONDS)
+                if not await self._search_limit_confirmed("HTTP 404 after fresh signing"):
                     raise
                 refused += 1
                 if not await self._quarantine_refused_search("HTTP 404 after fresh signing") or (
                     refused >= TRANSIENT_API_ERROR_RETRY_LIMIT
                 ):
                     raise SearchRefusedError(f"X refused {self.queue} with HTTP 404: {e}") from e
-            except SearchRefusedError:
+            except SearchRefusedError as e:
+                if not await self._search_limit_confirmed("(-1) Internal server error"):
+                    raise ServiceUnavailableError(str(e)) from e
                 refused += 1
                 if not await self._quarantine_refused_search("(-1) Internal server error") or (
                     refused >= TRANSIENT_API_ERROR_RETRY_LIMIT
