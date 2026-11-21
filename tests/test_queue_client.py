@@ -894,6 +894,25 @@ async def test_a_search_with_timeline_data_resets_the_refusal_escalation(
     assert (await pool.get("user1")).stats == {"SearchTimeline": 2}
 
 
+async def test_saving_a_loaded_account_keeps_its_refusal_streak(
+    httpx_mock: HTTPXMock, client_fixture: CF, monkeypatch
+):
+    """A login saves the loaded Account; its refusal streak survives, so the next refusal takes the next step."""
+    pool, client = client_fixture
+    monkeypatch.setattr("twscrape.queue_client.asyncio.sleep", _mock_sleep)
+    monkeypatch.delenv("TWS_SEARCH_REFUSAL_FIRST_LOCK_SECONDS", raising=False)
+    monkeypatch.delenv("TWS_SEARCH_REFUSAL_LOCK_SECONDS", raising=False)
+
+    assert await pool.record_refusal("user1", "SearchTimeline") == 1
+    user1 = await pool.get("user1")
+    user1.stats["SearchTimeline"] = 7
+    await pool.save(user1)
+
+    assert await _refuse_user1(httpx_mock, pool, client) == 1.0
+    await client._close_ctx()
+    assert (await pool.get("user1")).stats == {"SearchTimeline": 7}
+
+
 async def test_search_503_with_internal_server_error_stays_transient(
     httpx_mock: HTTPXMock, client_fixture: CF, monkeypatch
 ):
