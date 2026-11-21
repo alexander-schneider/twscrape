@@ -283,3 +283,65 @@ async def test_saving_an_account_logs_no_proxy_credentials(tmp_path, caplog):
 
     assert (await pool.get("u1")).proxy == proxy
     _assert_no_proxy_secret([*lines, caplog.text, *(r.getMessage() for r in caplog.records)])
+
+
+# Proxy URLs that do not parse cleanly: a raw "/" in the password, and ":" and "@" in it. Their fragments of 3 or
+# more characters must not appear anywhere.
+UNPARSEABLE_PROXIES = [
+    (
+        "http://fakeproxyuser:fakepa%40ss/w0rdsecret@127.0.0.1:9",
+        ["fakeproxyuser", "fakepa", "w0rdsecret"],
+    ),
+    (
+        "http://fakeproxyuser:pw1x:secr3t@w0rdz@127.0.0.1:9",
+        ["fakeproxyuser", "pw1x", "secr3t", "w0rdz"],
+    ),
+]
+
+
+@pytest.mark.parametrize("impersonate", [None, "chrome"])
+@pytest.mark.parametrize(("proxy", "fragments"), UNPARSEABLE_PROXIES)
+async def test_no_fragment_of_an_unparseable_proxy_password_leaks(
+    tmp_path, monkeypatch, impersonate, proxy, fragments
+):
+    """httpx reports "Invalid port: 'fakepa%40ss'" and curl "'http://***@w0rdz@127.0.0.1:9'": pieces of the
+    password that no exact-substring rule catches. The whole message is replaced, the type is kept."""
+    from types import SimpleNamespace
+
+    from loguru import logger
+
+    import twscrape.queue_client as queue_client_module
+    from twscrape.account import make_transport
+    from twscrape.accounts_pool import AccountsPool
+    from twscrape.queue_client import QueueClient
+
+    async def no_sleep(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(queue_client_module, "asyncio", SimpleNamespace(sleep=no_sleep))
+    monkeypatch.delenv("TWS_PROXY", raising=False)
+    monkeypatch.delenv("TWS_IMPERSONATE", raising=False)
+
+    with pytest.raises(Exception) as direct:
+        transport = make_transport(proxy, impersonate)
+        async with httpx.AsyncClient(transport=transport) as http:
+            await http.get("http://127.0.0.1:9/i/api/graphql/x/SearchTimeline")
+    assert isinstance(direct.value, (httpx.TransportError, httpx.InvalidURL))
+    assert "credentials removed" in str(direct.value)
+
+    pool = AccountsPool(str(tmp_path / "accounts.db"), raise_when_no_account=True)
+    await pool.add_account("u1", "_", "_", "_", proxy=proxy, cookies="auth_token=tok; ct0=csrf")
+    client = QueueClient(pool, "SearchTimeline", impersonate=impersonate)
+    lines: list[str] = []
+    sink = logger.add(lambda message: lines.append(str(message)), level="TRACE")
+    try:
+        with pytest.raises(Exception) as via_client:
+            await client.get("http://127.0.0.1:9/i/api/graphql/x/SearchTimeline")
+    finally:
+        logger.remove(sink)
+        await client._close_ctx()
+
+    texts = [*lines, *_exception_texts(direct.value), *_exception_texts(via_client.value)]
+    for text in texts:
+        for fragment in fragments:
+            assert fragment not in text, text
