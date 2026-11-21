@@ -45,6 +45,26 @@ behaviour stays as in v0.22.x.
   integer ones. `reset_locks` keeps the daily counts and `__first_used__`, so
   it does not lift a cap.
 
+## v0.22.5 - 2026-11-21
+
+### Fixed
+
+- A proxy curl-cffi takes from the environment (`https_proxy`, `HTTPS_PROXY`,
+  `http_proxy`, `all_proxy` and their upper-case forms) counts as configured:
+  transport errors then keep only their type, as for a configured proxy.
+  Before, a malformed environment proxy reached the queue's retry warning with
+  its credentials.
+- The log sink twscrape installs on import (`twscrape.logger.add_default_sink`)
+  runs without loguru's `backtrace` and `diagnose`, which print the values of a
+  traceback's local variables, proxy arguments included. An application that
+  adds its own loguru sink should pass `diagnose=False` too.
+
+### Known limit
+
+- httpcore logs connection details, including a proxy host, at DEBUG. With a
+  malformed proxy whose password is parsed as the host name, that record shows
+  it. Keep the `httpcore` logger at INFO or above in production.
+
 ## v0.22.4 - 2026-11-21
 
 ### Changed
