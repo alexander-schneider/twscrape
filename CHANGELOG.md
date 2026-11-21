@@ -1,5 +1,23 @@
 # Changelog
 
+## v0.22.3 - 2026-11-21
+
+A third review of the search refusal handling found three gaps.
+
+### Fixed
+
+- A proxy password with a full-width delimiter (for example U+FF1A, which
+  becomes ":" under NFKC) made `urlsplit()` raise a `ValueError` that quoted
+  the credentials before the sanitiser ran. Such a proxy now gets the generic
+  `proxy URL rejected by httpx/curl; credentials removed` message.
+- Every HTTP 5xx is classified as a transient `ServiceUnavailableError` before
+  the body is decoded or the rate-limit headers are parsed. Before, a 503 with
+  a body that is not UTF-8, or with a rate-limit header that is not a number,
+  escaped that rule and took the 15-minute unknown-error lock.
+- The signed control read before a search quarantine counts only with a
+  positive integer user id; `rest_id` 0, negative or not a number is an
+  inconclusive read (30-minute cooldown), not a confirmed refusal.
+
 ## v0.22.2 - 2026-11-21
 
 Two more reviews of v0.22.1 found credentials still reachable through
