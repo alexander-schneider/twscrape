@@ -132,18 +132,26 @@ def _int_header(rep: Response, name: str) -> int:
 
 
 def _outage_detail(rep: Response) -> str:
-    """The GraphQL errors of a 5xx answer when it has readable ones, otherwise only its status."""
+    """The GraphQL errors of a 5xx answer when it has readable ones, otherwise only its status. Never raises."""
     try:
         payload = rep.json()
-    except ValueError:
+        items = payload.get("errors") if isinstance(payload, dict) else None
+        messages = [
+            f"({item.get('code', -1)}) {item['message']}"
+            for item in (items if isinstance(items, list) else ())
+            if isinstance(item, dict) and isinstance(item.get("message"), str)
+        ]
+        return "; ".join(dict.fromkeys(messages)) or f"HTTP {rep.status_code}"
+    except Exception:
         return f"HTTP {rep.status_code}"
-    items = payload.get("errors") if isinstance(payload, dict) else None
-    messages = [
-        f"({item.get('code', -1)}) {item['message']}"
-        for item in items or ()
-        if isinstance(item, dict) and isinstance(item.get("message"), str)
-    ]
-    return "; ".join(dict.fromkeys(messages)) or f"HTTP {rep.status_code}"
+
+
+def _dump_tolerantly(rep: Response) -> None:
+    """The debug dump, which must never change how a response is classified."""
+    try:
+        dump_rep(rep)
+    except Exception as e:
+        logger.debug(f"Could not dump response: {type(e).__name__}")
 
 
 def has_user_data(rep: Response) -> bool:
@@ -457,12 +465,12 @@ class QueueClient:
         Or if None is returned, response will passed to api parser as is
         """
 
-        if self.debug:
-            dump_rep(rep)
-
         # An X outage, whatever the body (JSON errors, plain text, undecodable bytes or nothing) and whatever the
-        # headers: never an account lock or a refusal. Checked before the body or the headers are parsed.
+        # headers: never an account lock or a refusal. Decided by the status alone, before the body, the headers or
+        # the debug dump are touched.
         if 500 <= rep.status_code < 600:
+            if self.debug:
+                _dump_tolerantly(rep)
             detail = _outage_detail(rep)
             logger.warning(
                 f"Transient X API error detected: {rep.status_code:3d} - {req_id(rep)} - {detail}"
@@ -470,6 +478,9 @@ class QueueClient:
             raise ServiceUnavailableError(
                 f"Transient X API error ({rep.status_code}) for {self.queue}: {detail}"
             )
+
+        if self.debug:
+            _dump_tolerantly(rep)
 
         try:
             res = rep.json()

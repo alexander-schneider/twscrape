@@ -1,5 +1,26 @@
 # Changelog
 
+## v0.22.4 - 2026-11-21
+
+### Changed
+
+- With a proxy configured, transport errors keep only their type. Every error the
+  HTTP transport (httpx or curl-cffi) or the proxy setup raises becomes a new
+  error of the same type whose message is `proxy request failed; details
+  withheld because a proxy is configured (<type>)` or `proxy setup failed; …`;
+  the original message, cause and context are dropped. Substring redaction is
+  gone: no rule recognised every malformed proxy value (percent-encoded or
+  full-width separators, `host:port:user:password`, e-mail user names), and
+  libcurl and httpx quote the proxy URL with its credentials. Without a proxy,
+  errors are unchanged.
+
+### Fixed
+
+- Every HTTP 5xx is classified by its status before the debug dump, the body or
+  the headers are touched. A 503 whose `errors` field had the wrong shape (for
+  example `{"errors": 1}`) took the 15-minute unknown-error lock, and debug mode
+  failed on an undecodable body before the 5xx rule.
+
 ## v0.22.3 - 2026-11-21
 
 A third review of the search refusal handling found three gaps.
