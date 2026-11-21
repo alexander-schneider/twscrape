@@ -377,3 +377,80 @@ async def test_a_clean_transport_error_is_raised_without_context(monkeypatch, im
 
     assert exc_info.value.__context__ is None and exc_info.value.__cause__ is None
     assert "credentials removed" in str(exc_info.value)
+
+
+# Malformed proxy values seen in review round 4 of v0.22.3: no exact-substring rule recognises all of them, so
+# with a proxy configured no transport error may carry any part of its message (design, not redaction).
+MALFORMED_PROXIES = [
+    "http://fakeuser%40corp:fakesecretpw@127.0.0.1:9",  # percent-encoded @ in the user name
+    "http://fakeuser:fakesecretpw＠127.0.0.1:9",  # full-width @ as the separator
+    "http://fakeuser:fake：secretpw@127.0.0.1:9",  # full-width colon (NFKC ":")
+    "127.0.0.1:9:fakeuser:fakesecretpw",  # host:port:user:password, as some providers list it
+    "http://127.0.0.1:9:fakeuser:fakesecretpw",
+    "http://fake.user@mail.example:fakesecretpw@127.0.0.1:9",  # e-mail as the user name
+]
+FAKE_SECRET = "fakesecretpw"
+# Every 4-character piece of the password (except the generic "fake"), and the user names whole: their pieces
+# ("user", "mple") also occur in ordinary source lines a traceback quotes.
+SECRET_PIECES = {FAKE_SECRET[i : i + 4] for i in range(len(FAKE_SECRET) - 3)} - {"fake"} | {
+    "fakeuser",
+    "fake.user",
+    "mail.example",
+}
+
+
+def _secret_substrings() -> set[str]:
+    return SECRET_PIECES
+
+
+def _assert_no_secret_substring(texts: list[str]) -> None:
+    pieces = _secret_substrings()
+    for text in texts:
+        for piece in pieces:
+            assert piece not in text, (piece, text)
+
+
+@pytest.mark.parametrize("impersonate", [None, "chrome"])
+@pytest.mark.parametrize("proxy", MALFORMED_PROXIES)
+async def test_no_part_of_a_malformed_proxy_reaches_errors_tracebacks_or_logs(
+    tmp_path, monkeypatch, impersonate, proxy
+):
+    import traceback
+    from types import SimpleNamespace
+
+    from loguru import logger
+
+    import twscrape.queue_client as queue_client_module
+    from twscrape.account import make_transport
+    from twscrape.accounts_pool import AccountsPool
+    from twscrape.queue_client import QueueClient
+
+    async def no_sleep(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(queue_client_module, "asyncio", SimpleNamespace(sleep=no_sleep))
+    monkeypatch.delenv("TWS_PROXY", raising=False)
+    monkeypatch.delenv("TWS_IMPERSONATE", raising=False)
+
+    with pytest.raises(Exception) as direct:
+        transport = make_transport(proxy, impersonate)
+        async with httpx.AsyncClient(transport=transport) as http:
+            await http.get("http://127.0.0.1:9/i/api/graphql/x/SearchTimeline")
+
+    pool = AccountsPool(str(tmp_path / "accounts.db"), raise_when_no_account=True)
+    await pool.add_account("u1", "_", "_", "_", proxy=proxy, cookies="auth_token=tok; ct0=csrf")
+    client = QueueClient(pool, "SearchTimeline", impersonate=impersonate)
+    lines: list[str] = []
+    sink = logger.add(lambda message: lines.append(str(message)), level="TRACE")
+    try:
+        with pytest.raises(Exception) as via_client:
+            await client.get("http://127.0.0.1:9/i/api/graphql/x/SearchTimeline")
+    finally:
+        logger.remove(sink)
+        await client._close_ctx()
+
+    texts = [*lines]
+    for error in (direct.value, via_client.value):
+        texts += _exception_texts(error)
+        texts.append("".join(traceback.format_exception(type(error), error, error.__traceback__)))
+    _assert_no_secret_substring(texts)
