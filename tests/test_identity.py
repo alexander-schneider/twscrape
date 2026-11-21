@@ -60,7 +60,7 @@ class _Recorder(BaseHTTPRequestHandler):
     do_GET = _answer
     do_POST = _answer
 
-    def log_message(self, *args):
+    def log_message(self, format: str, *args) -> None:
         pass
 
 

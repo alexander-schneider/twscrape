@@ -426,7 +426,8 @@ async def test_get_for_queue_or_wait_takes_an_account_freed_during_the_check(
     for name in ("user1", "user2"):
         await pool.add_account(name, "p", "e", "ep", cookies="auth_token=t; ct0=c")
     await pool.lock_until("user1", "SearchTimeline", utc.ts() + 6 * 3600)
-    assert (await pool.get_for_queue("SearchTimeline")).username == "user2"
+    in_use = await pool.get_for_queue("SearchTimeline")
+    assert in_use is not None and in_use.username == "user2"
     seconds_until_available = pool.seconds_until_available
 
     async def released_meanwhile(queue):
