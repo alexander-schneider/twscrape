@@ -131,7 +131,7 @@ async def lock_seconds(pool: AccountsPool, username: str, queue="SearchTimeline"
 
 def test_jitter_stays_within_0_8_and_1_2_and_is_not_constant():
     budget = AccountBudget(pacing={"SearchTimeline": 60.0})
-    samples = [budget.pace_seconds("SearchTimeline") for _ in range(2000)]
+    samples = [budget.pace_seconds("SearchTimeline") or 0.0 for _ in range(2000)]
     assert all(48.0 <= s <= 72.0 for s in samples)
     assert max(samples) - min(samples) > 15  # spread over the range, not one machine-regular value
     assert budget.pace_seconds("TweetDetail") is None
@@ -606,8 +606,8 @@ async def test_accounts_info_shows_the_effective_budget_and_todays_count(tmp_pat
 
     info = {item["username"]: item for item in await pool.accounts_info()}
 
-    assert info["user1"]["budget"] == "SearchTimeline 12/40 every 600s; UserTweets every 150s"
-    assert info["user2"]["budget"] == "SearchTimeline 0/400 every 60s; UserTweets every 15s"
+    assert info["user1"].get("budget") == "SearchTimeline 12/40 every 600s; UserTweets every 150s"
+    assert info["user2"].get("budget") == "SearchTimeline 0/400 every 60s; UserTweets every 15s"
 
 
 async def test_without_a_budget_accounts_info_is_unchanged(tmp_path, monkeypatch):
