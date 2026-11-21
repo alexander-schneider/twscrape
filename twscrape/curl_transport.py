@@ -49,7 +49,7 @@ class CurlTransport(httpx.AsyncBaseTransport):
             headers=[
                 (key, value)
                 for key, value in rep.headers.multi_items()
-                if key.lower() not in DECODED_RESPONSE_HEADERS
+                if value is not None and key.lower() not in DECODED_RESPONSE_HEADERS
             ],
             content=rep.content,
             request=request,
