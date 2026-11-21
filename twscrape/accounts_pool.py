@@ -198,9 +198,17 @@ class AccountsPool:
         data = account.to_rs()
         cols = list(data.keys())
 
+        # Account.stats holds only the integer request counters; keep the stored refusal streak, which the
+        # loaded Account never carries, instead of erasing it on every save (for example after a login).
+        path = f'$."{REFUSALS_STATS_KEY}"'
+        keep_streak = f"""stats=CASE
+            WHEN json_extract(accounts.stats, '{path}') IS NULL THEN excluded.stats
+            ELSE json_set(excluded.stats, '{path}', json(json_extract(accounts.stats, '{path}')))
+        END"""
+        updates = [keep_streak if x == "stats" else f"{x}=excluded.{x}" for x in cols]
         qs = f"""
         INSERT INTO accounts ({",".join(cols)}) VALUES ({",".join([f":{x}" for x in cols])})
-        ON CONFLICT(username) DO UPDATE SET {",".join([f"{x}=excluded.{x}" for x in cols])}
+        ON CONFLICT(username) DO UPDATE SET {",".join(updates)}
         """
         await execute(self._db_file, qs, data)
 
@@ -278,7 +286,12 @@ class AccountsPool:
         await self.relogin([x["username"] for x in rs])
 
     async def reset_locks(self):
-        qs = "UPDATE accounts SET locks = json_object()"
+        """Lift every lock and end every refusal streak, so a returned account starts at the first step."""
+        qs = f"""
+        UPDATE accounts SET
+            locks = json_object(),
+            stats = json_remove(stats, '$."{REFUSALS_STATS_KEY}"')
+        """
         await execute(self._db_file, qs)
 
     async def set_active(self, username: str, active: bool):
@@ -363,11 +376,11 @@ class AccountsPool:
         SELECT username FROM accounts
         WHERE active = true AND (
             json_extract(locks, '$."{GLOBAL_LOCK_QUEUE}"') IS NULL
-            OR json_extract(locks, '$."{GLOBAL_LOCK_QUEUE}"') < datetime('now')
+            OR datetime(json_extract(locks, '$."{GLOBAL_LOCK_QUEUE}"')) < datetime('now')
         ) AND (
             locks IS NULL
             OR json_extract(locks, '$.{queue}') IS NULL
-            OR json_extract(locks, '$.{queue}') < datetime('now')
+            OR datetime(json_extract(locks, '$.{queue}')) < datetime('now')
         )
         ORDER BY {self._order_by}
         LIMIT 1
@@ -426,10 +439,13 @@ class AccountsPool:
 
     async def _earliest_unlock(self, queue: str) -> str | None:
         """When the first locked active account is free for `queue`: per account the later of its `queue` lock and
-        its global lock (both must have ended), then the earliest across accounts."""
+        its global lock (both must have ended), then the earliest across accounts.
+
+        Locks come in two formats (save writes ISO with a T and +00:00, lock_until 'YYYY-MM-DD HH:MM:SS'), so
+        every comparison goes through julianday()/datetime(), never the text."""
         qs = f"""
-        SELECT MIN(account_until) AS lock_until FROM (
-            SELECT MAX(lock_entry.value) AS account_until
+        SELECT datetime(MIN(account_until)) AS lock_until FROM (
+            SELECT MAX(julianday(lock_entry.value)) AS account_until
             FROM accounts
             JOIN json_each(locks) AS lock_entry
             WHERE active = true
@@ -486,7 +502,7 @@ class AccountsPool:
             return f"""
             SELECT COUNT(*) FROM accounts
             WHERE json_extract(locks, '$.{queue}') IS NOT NULL
-                AND json_extract(locks, '$.{queue}') > datetime('now')
+                AND datetime(json_extract(locks, '$.{queue}')) > datetime('now')
             """
 
         qs = "SELECT DISTINCT(f.key) as k from accounts, json_each(locks) f"

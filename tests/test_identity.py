@@ -13,6 +13,7 @@ import json
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
+import httpx
 import pytest
 
 from twscrape.account import Account, resolve_proxy
@@ -211,3 +212,162 @@ async def test_proxy_credentials_never_reach_logs_or_errors(
         assert FAKE_PROXY_USER not in text and FAKE_PROXY_PASS not in text, text
     if impersonate:
         assert any("Transport error" in line for line in lines)  # the WARNING after the retries
+
+
+def _exception_texts(error: BaseException) -> list[str]:
+    """str and repr of an error and of everything chained to it (__cause__, __context__, group members)."""
+    texts: list[str] = []
+    seen: set[int] = set()
+    pending: list[BaseException] = [error]
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        texts += [str(current), repr(current)]
+        pending += [e for e in (current.__cause__, current.__context__) if e is not None]
+        pending += list(getattr(current, "exceptions", ()))
+    return texts
+
+
+def _assert_no_proxy_secret(texts: list[str]) -> None:
+    for text in texts:
+        assert FAKE_PROXY_USER not in text and FAKE_PROXY_PASS not in text, text
+
+
+@pytest.mark.parametrize(
+    ("impersonate", "proxy"),
+    [
+        ("chrome", f"http://{FAKE_PROXY_USER}:{FAKE_PROXY_PASS}@127.0.0.1:notaport"),
+        (None, f"{FAKE_PROXY_USER}:{FAKE_PROXY_PASS}@127.0.0.1:notaport"),
+        (None, f"http://{FAKE_PROXY_USER}:{FAKE_PROXY_PASS}@127.0.0.1:notaport"),
+        (None, f"http://{FAKE_PROXY_USER}:{FAKE_PROXY_PASS}@127.0.0.1:9"),
+    ],
+)
+async def test_transport_errors_carry_no_credentials_anywhere_in_their_chain(
+    monkeypatch, impersonate, proxy
+):
+    """Sentry, loguru's diagnose and exc_info formatters print __cause__ and __context__: the original libcurl or
+    httpx error with the proxy URL must not hang on the clean one."""
+    from twscrape.account import make_transport
+
+    monkeypatch.delenv("TWS_PROXY", raising=False)
+    with pytest.raises(Exception) as exc_info:
+        transport = make_transport(proxy, impersonate)
+        async with httpx.AsyncClient(transport=transport) as client:
+            await client.get("http://127.0.0.1:9/i/api/graphql/x/SearchTimeline")
+
+    _assert_no_proxy_secret(_exception_texts(exc_info.value))
+
+
+async def test_saving_an_account_logs_no_proxy_credentials(tmp_path, caplog):
+    """aiosqlite logs every call with its SQL parameters at DEBUG, the account's proxy and cookies among them."""
+    import logging
+
+    from loguru import logger
+
+    from twscrape.accounts_pool import AccountsPool
+
+    caplog.set_level(logging.DEBUG)
+    caplog.set_level(logging.DEBUG, logger="aiosqlite")
+    lines: list[str] = []
+    sink = logger.add(lambda message: lines.append(str(message)), level="TRACE")
+    try:
+        pool = AccountsPool(str(tmp_path / "accounts.db"))
+        proxy = f"http://{FAKE_PROXY_USER}:{FAKE_PROXY_PASS}@127.0.0.1:8080"
+        await pool.add_account("u1", "_", "_", "_", proxy=proxy, cookies="auth_token=t; ct0=c")
+        account = await pool.get("u1")
+        await pool.save(account)
+    finally:
+        logger.remove(sink)
+
+    assert (await pool.get("u1")).proxy == proxy
+    _assert_no_proxy_secret([*lines, caplog.text, *(r.getMessage() for r in caplog.records)])
+
+
+# Proxy URLs that do not parse cleanly: a raw "/" in the password, and ":" and "@" in it. Their fragments of 3 or
+# more characters must not appear anywhere.
+UNPARSEABLE_PROXIES = [
+    (
+        "http://fakeproxyuser:fakepa%40ss/w0rdsecret@127.0.0.1:9",
+        ["fakeproxyuser", "fakepa", "w0rdsecret"],
+    ),
+    (
+        "http://fakeproxyuser:pw1x:secr3t@w0rdz@127.0.0.1:9",
+        ["fakeproxyuser", "pw1x", "secr3t", "w0rdz"],
+    ),
+]
+
+
+@pytest.mark.parametrize("impersonate", [None, "chrome"])
+@pytest.mark.parametrize(("proxy", "fragments"), UNPARSEABLE_PROXIES)
+async def test_no_fragment_of_an_unparseable_proxy_password_leaks(
+    tmp_path, monkeypatch, impersonate, proxy, fragments
+):
+    """httpx reports "Invalid port: 'fakepa%40ss'" and curl "'http://***@w0rdz@127.0.0.1:9'": pieces of the
+    password that no exact-substring rule catches. The whole message is replaced, the type is kept."""
+    from types import SimpleNamespace
+
+    from loguru import logger
+
+    import twscrape.queue_client as queue_client_module
+    from twscrape.account import make_transport
+    from twscrape.accounts_pool import AccountsPool
+    from twscrape.queue_client import QueueClient
+
+    async def no_sleep(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(queue_client_module, "asyncio", SimpleNamespace(sleep=no_sleep))
+    monkeypatch.delenv("TWS_PROXY", raising=False)
+    monkeypatch.delenv("TWS_IMPERSONATE", raising=False)
+
+    with pytest.raises(Exception) as direct:
+        transport = make_transport(proxy, impersonate)
+        async with httpx.AsyncClient(transport=transport) as http:
+            await http.get("http://127.0.0.1:9/i/api/graphql/x/SearchTimeline")
+    assert isinstance(direct.value, (httpx.TransportError, httpx.InvalidURL))
+    assert "credentials removed" in str(direct.value)
+
+    pool = AccountsPool(str(tmp_path / "accounts.db"), raise_when_no_account=True)
+    await pool.add_account("u1", "_", "_", "_", proxy=proxy, cookies="auth_token=tok; ct0=csrf")
+    client = QueueClient(pool, "SearchTimeline", impersonate=impersonate)
+    lines: list[str] = []
+    sink = logger.add(lambda message: lines.append(str(message)), level="TRACE")
+    try:
+        with pytest.raises(Exception) as via_client:
+            await client.get("http://127.0.0.1:9/i/api/graphql/x/SearchTimeline")
+    finally:
+        logger.remove(sink)
+        await client._close_ctx()
+
+    texts = [*lines, *_exception_texts(direct.value), *_exception_texts(via_client.value)]
+    for text in texts:
+        for fragment in fragments:
+            assert fragment not in text, text
+
+
+@pytest.mark.parametrize("impersonate", [None, "chrome"])
+@pytest.mark.parametrize(
+    "proxy",
+    [
+        f"http://{FAKE_PROXY_USER}:{FAKE_PROXY_PASS}@127.0.0.1:notaport",
+        "http://fakeproxyuser:fakepa%40ss/w0rdsecret@127.0.0.1:9",
+    ],
+)
+async def test_a_clean_transport_error_is_raised_without_context(monkeypatch, impersonate, proxy):
+    """CI runs 44921978929 and 44921942025 failed on Python 3.10 only. There the CurlError that curl-cffi handled
+    inside its awaited coroutine (session.py, `except CurlError`) is still in sys.exc_info() after our except
+    block, so a plain `raise` after the block chained the libcurl error, credentials included, as __context__.
+    On 3.11+ the same code raised without context, so this test is red on 3.10 only."""
+    from twscrape.account import make_transport
+
+    monkeypatch.delenv("TWS_PROXY", raising=False)
+    with pytest.raises(Exception) as exc_info:
+        transport = make_transport(proxy, impersonate)
+        await transport.handle_async_request(
+            httpx.Request("GET", "http://127.0.0.1:9/i/api/graphql/x/SearchTimeline")
+        )
+
+    assert exc_info.value.__context__ is None and exc_info.value.__cause__ is None
+    assert "credentials removed" in str(exc_info.value)

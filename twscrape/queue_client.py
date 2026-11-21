@@ -131,9 +131,12 @@ def has_user_data(rep: Response) -> bool:
         res = rep.json()
     except ValueError:
         return False
-    user = res.get("data", {}).get("user") if isinstance(res, dict) else None
+    # Every level may be null, a list or missing; only a dict at each level leads to a user id.
+    data = res.get("data") if isinstance(res, dict) else None
+    user = data.get("user") if isinstance(data, dict) else None
     result = user.get("result") if isinstance(user, dict) else None
-    return isinstance(result, dict) and bool(result.get("rest_id"))
+    rest_id = result.get("rest_id") if isinstance(result, dict) else None
+    return isinstance(rest_id, (str, int)) and not isinstance(rest_id, bool) and bool(str(rest_id))
 
 
 def has_error(errors: list[str], prefix: str) -> bool:
@@ -388,12 +391,13 @@ class QueueClient:
             gen = await XClIdGenStore.get(ctx.acc, proxy=self.proxy, impersonate=self.impersonate)
             hdr = {"x-client-transaction-id": gen.calc("GET", urlparse(url).path)}
             rep = await ctx.clt.get(url, params=encode_params(params), headers=hdr)
+            # Inside the try: any surprise in the answer is an inconclusive read, never an escaping error.
+            return has_user_data(rep)
         except Exception as e:
             logger.warning(
                 f"Signed control read failed for {ctx.acc.username}: {type(e).__name__}: {e}"
             )
             return False
-        return has_user_data(rep)
 
     async def _search_limit_confirmed(self, reason: str) -> bool:
         """A refused search counts as a search limit only when the signed control read returns user data.
@@ -462,6 +466,14 @@ class QueueClient:
 
         log_msg = f"{rep.status_code:3d} - {req_id(rep)} - {err_msg}"
         logger.trace(log_msg)
+
+        # An X outage, whatever the body (JSON errors, plain text or nothing): never an account lock or a refusal.
+        if 500 <= rep.status_code < 600:
+            logger.warning(f"Transient X API error detected: {log_msg}")
+            detail = err_msg if errors else f"HTTP {rep.status_code}"
+            raise ServiceUnavailableError(
+                f"Transient X API error ({rep.status_code}) for {self.queue}: {detail}"
+            )
 
         if malformed_errors:
             logger.error(f"API malformed errors payload: {log_msg}")

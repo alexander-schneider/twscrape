@@ -228,7 +228,7 @@ def build_parser() -> argparse.ArgumentParser:
         cmd.add_argument("--email-first", action="store_true", help="Check email first")
         cmd.add_argument("--manual", action="store_true", help="Enter email code manually")
 
-    subparsers.add_parser("reset_locks", help="Reset all locks")
+    subparsers.add_parser("reset_locks", help="Reset all locks and search refusal streaks")
     subparsers.add_parser("delete_inactive", help="Delete inactive accounts")
 
     c_lim("search", "Search for tweets", "query", "Search query")

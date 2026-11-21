@@ -147,11 +147,13 @@ x-client-transaction-ids. Before it counts, one signed control read
 (UserByScreenName `X`) must return user data (`data.user.result.rest_id`). Then
 the account is locked for search: 30 minutes for its first refusal, doubled for
 each consecutive refusal up to 6 hours (see the `TWS_SEARCH_REFUSAL_*` variables).
-The count of consecutive refusals is stored per account in `accounts.db` and
-goes back to 0 when the account completes a search with timeline data. If the
-control read returns no user data, the account cools down for 30 minutes and the
-request fails. A 5xx answer is never a refusal; it takes the temporary-failure
-path above. The request moves to a free account after a refusal and raises
+The count of consecutive refusals is stored per account in `accounts.db`. It
+survives saving the account (for example after a login) and goes back to 0 when
+the account completes a search with timeline data or when `twscrape reset_locks`
+(`AccountsPool.reset_locks`) lifts the locks. If the control read returns no
+user data, or an answer it cannot read, the account cools down for 30 minutes
+and the request fails. Every HTTP 5xx, whatever its body, is never a refusal and
+never an account lock; it takes the temporary-failure path above. The request moves to a free account after a refusal and raises
 `SearchRefusedError` (a `ServiceUnavailableError`) without one.
 
 `AbortReqError` and `XClIdParseError` are also exported from `twscrape`. Requests

@@ -189,7 +189,8 @@ async def test_swallowed_parser_and_http_failures_cannot_pass(
     if case == "parse":
         probe_wire.enqueue(page(tweet(501, date="invalid-date")))
     else:
-        probe_wire.enqueue(page(), status=503)
+        # A 5xx is transient: the request tries three times before it raises ServiceUnavailableError.
+        probe_wire.enqueue(*(page() for _ in range(3)), status=503)
     report = await live.run(ENV)
     assert report["status"] == "fail" and report["category"] == category
     assert report["counts"]["direct_replies"] == 0

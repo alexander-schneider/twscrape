@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import random
 import sqlite3
 
@@ -7,6 +8,16 @@ import aiosqlite
 from .logger import logger
 
 MIN_SQLITE_VERSION = "3.24"
+
+
+def _no_aiosqlite_debug(record: logging.LogRecord) -> bool:
+    # aiosqlite logs every call with its SQL parameters at DEBUG ("executing functools.partial(...)"), which
+    # include account passwords, cookies and proxy URLs. A filter, unlike a level, also holds when an
+    # application turns the aiosqlite logger to DEBUG.
+    return record.levelno >= logging.WARNING
+
+
+logging.getLogger("aiosqlite").addFilter(_no_aiosqlite_debug)
 
 _lock = asyncio.Lock()
 

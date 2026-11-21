@@ -811,10 +811,16 @@ async def test_search_refusal_lock_is_configurable(
     assert await _refusal_lock_hours(httpx_mock, pool, client, times=3) == [2.0, 4.0, 5.0]
 
 
+async def _free_both_accounts(pool: AccountsPool) -> None:
+    """Lift the search locks only; reset_locks would also end the refusal streak."""
+    for username in ("user1", "user2"):
+        await pool.unlock(username, "SearchTimeline")
+
+
 async def _refuse_user1(httpx_mock: HTTPXMock, pool: AccountsPool, client: QueueClient) -> float:
     """One request whose search user1 refuses (confirmed by the control read); user2 answers. user1's lock."""
     await client._close_ctx()
-    await pool.reset_locks()
+    await _free_both_accounts(pool)
     httpx_mock.add_response(url=URL, json=REFUSED, status_code=200)
     httpx_mock.add_response(url=CONTROL_URL, json=CONTROL_OK, status_code=200)
     httpx_mock.add_response(url=URL, json={"foo": "ok"}, status_code=200)
@@ -831,7 +837,7 @@ async def _refusal_lock_hours(
 
 async def _search_user1(httpx_mock: HTTPXMock, pool: AccountsPool, client: QueueClient, body):
     await client._close_ctx()
-    await pool.reset_locks()
+    await _free_both_accounts(pool)
     httpx_mock.add_response(url=URL, json=body, status_code=200)
     rep = await client.get(URL)
     assert rep is not None and getattr(rep, "__username") == "user1"
@@ -894,6 +900,51 @@ async def test_a_search_with_timeline_data_resets_the_refusal_escalation(
     assert (await pool.get("user1")).stats == {"SearchTimeline": 2}
 
 
+async def test_saving_a_loaded_account_keeps_its_refusal_streak(
+    httpx_mock: HTTPXMock, client_fixture: CF, monkeypatch
+):
+    """A login saves the loaded Account; its refusal streak survives, so the next refusal takes the next step."""
+    pool, client = client_fixture
+    monkeypatch.setattr("twscrape.queue_client.asyncio.sleep", _mock_sleep)
+    monkeypatch.delenv("TWS_SEARCH_REFUSAL_FIRST_LOCK_SECONDS", raising=False)
+    monkeypatch.delenv("TWS_SEARCH_REFUSAL_LOCK_SECONDS", raising=False)
+
+    assert await pool.record_refusal("user1", "SearchTimeline") == 1
+    user1 = await pool.get("user1")
+    user1.stats["SearchTimeline"] = 7
+    await pool.save(user1)
+
+    assert await _refuse_user1(httpx_mock, pool, client) == 1.0
+    await client._close_ctx()
+    assert (await pool.get("user1")).stats == {"SearchTimeline": 7}
+
+
+@pytest.mark.parametrize("via_cli", [False, True])
+async def test_reset_locks_also_ends_the_refusal_streak(
+    via_cli, httpx_mock: HTTPXMock, client_fixture: CF, monkeypatch
+):
+    """An operator who puts an account back with `twscrape reset_locks` gives it a fresh start: its next refusal
+    locks for 30 minutes, not the next step."""
+    from types import SimpleNamespace
+
+    import twscrape.cli as cli
+
+    pool, client = client_fixture
+    monkeypatch.setattr("twscrape.queue_client.asyncio.sleep", _mock_sleep)
+    monkeypatch.delenv("TWS_SEARCH_REFUSAL_FIRST_LOCK_SECONDS", raising=False)
+    monkeypatch.delenv("TWS_SEARCH_REFUSAL_LOCK_SECONDS", raising=False)
+    for _ in range(2):
+        await pool.record_refusal("user1", "SearchTimeline")
+
+    if via_cli:
+        await cli.main(SimpleNamespace(command="reset_locks", debug=False, db=str(pool._db_file)))
+    else:
+        await pool.reset_locks()
+
+    assert await _refuse_user1(httpx_mock, pool, client) == 0.5
+    await client._close_ctx()
+
+
 async def test_search_503_with_internal_server_error_stays_transient(
     httpx_mock: HTTPXMock, client_fixture: CF, monkeypatch
 ):
@@ -916,13 +967,48 @@ async def test_search_503_with_internal_server_error_stays_transient(
 
 
 @pytest.mark.parametrize(
-    "control",
+    ("status", "body"),
     [
-        {"data": {"user": {}}},
-        {"errors": [{"code": -1, "message": "Internal server error"}]},
-        {"data": {"user": {"result": {"__typename": "UserUnavailable"}}}},
+        (503, {"text": "upstream connect error or disconnect/reset before headers"}),
+        (502, {"content": b""}),
+        (503, {"json": REFUSED}),
+        (500, {"json": {"errors": [{"code": 999, "message": "Something new"}]}}),
     ],
 )
+async def test_every_search_5xx_is_transient_whatever_the_body(
+    status, body, httpx_mock: HTTPXMock, client_fixture: CF, monkeypatch
+):
+    """A 5xx is an X outage whatever its body: no 15-minute account lock and no internal retry beyond the
+    transient path; the request raises ServiceUnavailableError and leaves every account free."""
+    pool, client = client_fixture
+    monkeypatch.setattr("twscrape.queue_client.asyncio.sleep", _mock_sleep)
+    monkeypatch.setenv("TWS_RAISE_WHEN_NO_ACCOUNT", "1")  # fail instead of waiting for an account
+    for _ in range(3):
+        httpx_mock.add_response(url=URL, status_code=status, **body)
+
+    async with client:
+        with pytest.raises(ServiceUnavailableError, match=f"Transient X API error \\({status}\\)"):
+            await client.get(URL)
+
+    assert len(httpx_mock.get_requests()) == 3
+    assert _control_requests(httpx_mock) == []
+    assert await _search_lock_hours(pool) == {}
+
+
+CONTROLS_WITHOUT_USER_DATA = [
+    {"json": {"data": {"user": {}}}},
+    {"json": {"errors": [{"code": -1, "message": "Internal server error"}]}},
+    {"json": {"data": {"user": {"result": {"__typename": "UserUnavailable"}}}}},
+    {"json": {"data": None}},
+    {"json": {"data": {"user": None}}},
+    {"json": {"data": {"user": {"result": None}}}},
+    {"json": {"data": []}},
+    {"json": None},
+    {"text": "{not json"},
+]
+
+
+@pytest.mark.parametrize("control", CONTROLS_WITHOUT_USER_DATA)
 async def test_search_refusal_with_a_control_read_without_user_data_is_not_a_search_limit(
     control, httpx_mock: HTTPXMock, client_fixture: CF, monkeypatch
 ):
@@ -934,7 +1020,7 @@ async def test_search_refusal_with_a_control_read_without_user_data_is_not_a_sea
     monkeypatch.setenv("TWS_RAISE_WHEN_NO_ACCOUNT", "1")  # fail instead of waiting for an account
     await client.__aenter__()
     httpx_mock.add_response(url=URL, json=REFUSED, status_code=200)
-    httpx_mock.add_response(url=CONTROL_URL, json=control, status_code=200)
+    httpx_mock.add_response(url=CONTROL_URL, status_code=200, **control)
 
     with pytest.raises(ServiceUnavailableError) as exc_info:
         await client.get(URL)
@@ -944,8 +1030,9 @@ async def test_search_refusal_with_a_control_read_without_user_data_is_not_a_sea
     assert (await _search_lock_hours(pool))["user1"] == 0.5
 
 
+@pytest.mark.parametrize("control", CONTROLS_WITHOUT_USER_DATA)
 async def test_search_404_with_a_control_read_without_user_data_is_not_a_search_limit(
-    httpx_mock: HTTPXMock, client_fixture: CF, monkeypatch
+    control, httpx_mock: HTTPXMock, client_fixture: CF, monkeypatch
 ):
     pool, client = client_fixture
     monkeypatch.setattr("twscrape.queue_client.asyncio.sleep", _mock_sleep)
@@ -953,11 +1040,7 @@ async def test_search_404_with_a_control_read_without_user_data_is_not_a_search_
     await client.__aenter__()
     for _ in range(3):
         httpx_mock.add_response(url=URL, status_code=404, text="")
-    httpx_mock.add_response(
-        url=CONTROL_URL,
-        json={"errors": [{"code": -1, "message": "Internal server error"}]},
-        status_code=200,
-    )
+    httpx_mock.add_response(url=CONTROL_URL, status_code=200, **control)
 
     with pytest.raises(AbortReqError) as exc_info:
         await client.get(URL)
