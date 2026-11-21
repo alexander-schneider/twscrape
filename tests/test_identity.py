@@ -333,7 +333,7 @@ async def test_no_fragment_of_an_unparseable_proxy_password_leaks(
         async with httpx.AsyncClient(transport=transport) as http:
             await http.get("http://127.0.0.1:9/i/api/graphql/x/SearchTimeline")
     assert isinstance(direct.value, (httpx.TransportError, httpx.InvalidURL))
-    assert "credentials removed" in str(direct.value)
+    assert "details withheld" in str(direct.value)
 
     pool = AccountsPool(str(tmp_path / "accounts.db"), raise_when_no_account=True)
     await pool.add_account("u1", "_", "_", "_", proxy=proxy, cookies="auth_token=tok; ct0=csrf")
@@ -376,7 +376,7 @@ async def test_a_clean_transport_error_is_raised_without_context(monkeypatch, im
         )
 
     assert exc_info.value.__context__ is None and exc_info.value.__cause__ is None
-    assert "credentials removed" in str(exc_info.value)
+    assert "details withheld" in str(exc_info.value)
 
 
 # Malformed proxy values seen in review round 4 of v0.22.3: no exact-substring rule recognises all of them, so

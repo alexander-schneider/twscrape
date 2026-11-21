@@ -8,7 +8,7 @@ from typing import Literal
 from httpx import AsyncBaseTransport, AsyncClient, AsyncHTTPTransport, Request, Response
 
 from .models import JSONTrait
-from .redaction import raise_without_context, redacted_error
+from .redaction import proxy_safe_error, raise_without_context
 from .utils import utc
 
 
@@ -26,7 +26,8 @@ def resolve_impersonate(impersonate: str | None) -> str | None:
 
 
 class RedactingTransport(AsyncBaseTransport):
-    """Raises the wrapped transport's errors without the proxy credentials httpx may put into them."""
+    """With a proxy configured, raises the wrapped transport's errors with their type only: no message, cause or
+    context, since httpx and libcurl may quote the proxy URL with its credentials."""
 
     def __init__(self, transport: AsyncBaseTransport, proxy: str | None):
         self._transport = transport
@@ -36,7 +37,7 @@ class RedactingTransport(AsyncBaseTransport):
         try:
             return await self._transport.handle_async_request(request)
         except Exception as error:
-            clean = redacted_error(error, self._proxy)
+            clean = proxy_safe_error(error, self._proxy)
             if clean is None:
                 raise
         raise_without_context(clean)
@@ -56,7 +57,7 @@ def make_transport(proxy: str | None, impersonate: str | None) -> AsyncBaseTrans
         return RedactingTransport(transport, proxy)
     except Exception as error:
         # httpx echoes a malformed proxy URL in its construction error (e.g. a missing scheme).
-        clean = redacted_error(error, proxy)
+        clean = proxy_safe_error(error, proxy, setup=True)
         if clean is None:
             raise
     raise_without_context(clean)
