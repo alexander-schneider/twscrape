@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 import pytest
 
 from twscrape.accounts_pool import GLOBAL_LOCK_QUEUE, AccountsPool, NoAccountError
@@ -480,3 +482,32 @@ async def test_seconds_until_available_takes_the_later_lock_per_account_and_the_
 
     wait_s = await pool_mock.seconds_until_available("SearchTimeline")
     assert wait_s is not None and 2 * 3600 - 5 <= wait_s <= 2 * 3600
+
+
+async def _save_search_lock(pool: AccountsPool, username: str, seconds: int) -> None:
+    """A lock as AccountsPool.save writes it: ISO 8601 with a T and +00:00 (lock_until writes 'YYYY-MM-DD HH:MM:SS')."""
+    account = await pool.get(username)
+    account.locks["SearchTimeline"] = utc.from_iso(
+        datetime.fromtimestamp(utc.ts() + seconds, timezone.utc).isoformat()
+    )
+    await pool.save(account)
+
+
+async def test_lock_formats_are_compared_by_time_not_text(pool_mock: AccountsPool):
+    """A saved account has ISO locks ('2026-11-21T09:00:00+00:00'); lock_until writes '2026-11-21 14:00:00'. As
+    text, 'T' sorts after ' ', so MAX picked the 09:00 lock over the 14:00 one."""
+    await pool_mock.add_account("user1", "p", "e", "ep", cookies="auth_token=t; ct0=c")
+    await _save_search_lock(pool_mock, "user1", 3600)
+    await pool_mock.lock_until("user1", GLOBAL_LOCK_QUEUE, utc.ts() + 5 * 3600)
+
+    wait_s = await pool_mock.seconds_until_available("SearchTimeline")
+    assert wait_s is not None and 5 * 3600 - 5 <= wait_s <= 5 * 3600
+
+
+async def test_an_expired_iso_lock_frees_the_account(pool_mock: AccountsPool):
+    await pool_mock.add_account("user1", "p", "e", "ep", cookies="auth_token=t; ct0=c")
+    await _save_search_lock(pool_mock, "user1", -60)
+
+    assert (await pool_mock.stats())["locked_SearchTimeline"] == 0
+    account = await pool_mock.get_for_queue("SearchTimeline")
+    assert account is not None and account.username == "user1"
