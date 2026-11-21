@@ -9,7 +9,7 @@ from fake_useragent import UserAgent
 from httpx import HTTPStatusError
 
 from .account import Account
-from .budget import AccountBudget
+from .budget import DAILY_STATS_KEY, AccountBudget, utc_day
 from .db import execute, fetchall, fetchone
 from .logger import logger
 from .login import LoginConfig, login
@@ -335,6 +335,35 @@ class AccountsPool:
             {"username": username},
         )
         return int(rs[0]) if rs and rs[0] else 1
+
+    async def count_request(self, username: str, queue: str, cap: int | None) -> int | None:
+        """Counts one request of the account on `queue` for today (UTC) before it is sent; returns the new count.
+
+        One UPDATE checks the cap and increments, so two processes cannot both pass a full cap. Returns None and
+        counts nothing when today's count has already reached `cap`. A new UTC day starts again at 1.
+        """
+        path = f'$."{DAILY_STATS_KEY}"."{queue}"'
+        same_day = f"json_extract(stats, '{path}.day') = :day"
+        count = f"COALESCE(json_extract(stats, '{path}.count'), 0)"
+        tx = uuid.uuid4().hex
+        qs = f"""
+        UPDATE accounts SET
+            stats = json_set(
+                stats, '{path}',
+                json_object('day', :day, 'count', CASE WHEN {same_day} THEN {count} + 1 ELSE 1 END)
+            ),
+            _tx = :tx
+        WHERE username = :username
+            AND (:cap IS NULL OR json_extract(stats, '{path}.day') IS NOT :day OR {count} < :cap)
+        """
+        params = {"username": username, "day": utc_day(utc.now()), "cap": cap, "tx": tx}
+        await execute(self._db_file, qs, params)
+        rs = await fetchone(
+            self._db_file,
+            f"SELECT json_extract(stats, '{path}.count') FROM accounts WHERE _tx = :tx",
+            {"tx": tx},
+        )
+        return int(rs[0]) if rs and rs[0] is not None else None
 
     async def reset_refusals(self, username: str, queue: str) -> None:
         """Ends the account's refusal streak on `queue`; writes nothing when there is none."""

@@ -16,6 +16,7 @@ import random
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 
 PACING_ENV = "TWS_ACCOUNT_PACING"
 DAILY_CAPS_ENV = "TWS_ACCOUNT_DAILY_CAPS"
@@ -24,6 +25,8 @@ WARMUP_START_FRACTION_ENV = "TWS_WARMUP_START_FRACTION"
 DEFAULT_WARMUP_START_FRACTION = 0.1
 # Queue names are GraphQL operation names; they end up in JSON paths, so nothing else is accepted.
 _QUEUE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+# Reserved keys in an account's stats JSON (objects or strings, so Account.from_rs and the counters skip them).
+DAILY_STATS_KEY = "__daily__"  # {"SearchTimeline": {"day": "2026-11-22", "count": 12}}
 # The pacing interval is stretched or shortened by a uniform factor, so the rhythm is not machine-regular.
 JITTER_LOW, JITTER_HIGH = 0.8, 1.2
 
@@ -101,6 +104,13 @@ class AccountBudget:
     def applies_to(self, queue: str) -> bool:
         return queue in self.pacing or queue in self.daily_caps
 
+    def cap_for(self, queue: str, fraction: float = 1.0) -> int | None:
+        """Requests per UTC day for `queue`, times the warm-up fraction (floor, at least 1); None when uncapped."""
+        cap = self.daily_caps.get(queue)
+        if cap is None:
+            return None
+        return max(1, math.floor(cap * fraction))
+
     def pace_seconds(self, queue: str, fraction: float = 1.0) -> float | None:
         """How long the account stays off `queue` after a request: the interval, divided by the warm-up
         fraction, times a jitter in 0.8..1.2. None when the queue is not paced."""
@@ -108,3 +118,13 @@ class AccountBudget:
         if interval is None:
             return None
         return interval / fraction * random.uniform(JITTER_LOW, JITTER_HIGH)
+
+
+def utc_day(now: datetime) -> str:
+    return now.astimezone(timezone.utc).date().isoformat()
+
+
+def next_utc_midnight(now: datetime) -> int:
+    """Unix seconds of the next UTC midnight after `now`: when a daily cap ends."""
+    day = now.astimezone(timezone.utc).date() + timedelta(days=1)
+    return int(datetime(day.year, day.month, day.day, tzinfo=timezone.utc).timestamp())

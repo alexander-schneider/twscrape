@@ -10,6 +10,7 @@ from httpx import AsyncClient, Response
 
 from .account import Account, resolve_proxy
 from .accounts_pool import GLOBAL_LOCK_QUEUE, AccountsPool, has_required_cookies
+from .budget import next_utc_midnight
 from .logger import LogOnce, logger
 from .utils import utc
 from .xclid import XClIdAccountError, XClIdGen, XClIdParseError
@@ -74,6 +75,10 @@ class ServiceUnavailableError(UnexpectedApiError): ...
 
 class SearchRefusedError(ServiceUnavailableError):
     """X refused SearchTimeline for every account tried; each one is quarantined (vladkens/twscrape#367)."""
+
+
+class DailyCapReached(Exception):
+    """The account has used its daily cap on the queue; it sends nothing more there until UTC midnight."""
 
 
 class NotFoundAfterSigningError(AbortReqError):
@@ -199,6 +204,8 @@ class Ctx:
         self.before_send: Callable[[], Awaitable[None]] | None = None
         # Seconds the account stays off the queue after its last request (pacing); None when not paced.
         self.pace_seconds: float | None = None
+        # Unix seconds until which the account's daily cap on the queue holds it; None below the cap.
+        self.cap_until: int | None = None
 
     async def retry(self, kind: str, limit: int) -> bool:
         self.failures[kind] += 1
@@ -309,14 +316,28 @@ class QueueClient:
         return ctx
 
     async def _before_send(self, ctx: "Ctx") -> None:
-        """Budget accounting for one request the account is about to send on this queue."""
+        """Budget accounting for one request the account is about to send on this queue.
+
+        The daily count is stored before the request goes out (X counts requests, failed ones too). An account
+        already at its cap sends nothing: DailyCapReached moves the request to another account.
+        """
+        cap = self.budget.cap_for(self.queue)
+        if cap is not None:
+            count = await self.pool.count_request(ctx.acc.username, self.queue, cap)
+            if count is None or count >= cap:
+                ctx.cap_until = next_utc_midnight(utc.now())
+            if count is None:
+                raise DailyCapReached(
+                    f"{ctx.acc.username} used its daily cap of {cap} on {self.queue}"
+                )
         ctx.pace_seconds = self.budget.pace_seconds(self.queue)
 
     def _budget_floor(self, ctx: "Ctx") -> int:
         """The earliest the account may use this queue again under its budget (unix seconds), or 0."""
-        if ctx.pace_seconds is None:
-            return 0
-        return utc.ts() + int(round(ctx.pace_seconds))
+        floor = ctx.cap_until or 0
+        if ctx.pace_seconds is not None:
+            floor = max(floor, utc.ts() + int(round(ctx.pace_seconds)))
+        return floor
 
     async def _release_held(self, usernames: list[str]) -> None:
         """Release accounts given up after a transient error, but not before their pacing ends."""
@@ -687,6 +708,10 @@ class QueueClient:
                     # A paced account goes back to the pool with its lock; the next page takes the next one.
                     await self._close_ctx()
                 return rep
+            except DailyCapReached as e:
+                logger.info(f"{e}; it waits for the next UTC day")
+                await self._close_ctx()
+                continue
             except NotFoundAfterSigningError as e:
                 if self.queue != SEARCH_QUEUE:
                     raise
