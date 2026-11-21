@@ -175,9 +175,10 @@ async def test_proxy_credentials_never_reach_logs_or_errors(
     neither a log line at any level nor the raised error carries the proxy username or password."""
     from types import SimpleNamespace
 
+    from loguru import logger
+
     import twscrape.queue_client as queue_client_module
     from twscrape.accounts_pool import AccountsPool
-    from twscrape.logger import logger
     from twscrape.queue_client import QueueClient
 
     async def no_sleep(*args, **kwargs):
@@ -188,9 +189,7 @@ async def test_proxy_credentials_never_reach_logs_or_errors(
     monkeypatch.delenv("TWS_PROXY", raising=False)
     monkeypatch.delenv("TWS_IMPERSONATE", raising=False)
     pool = AccountsPool(str(tmp_path / "accounts.db"), raise_when_no_account=True)
-    await pool.add_account(
-        "u1", "_", "_", "_", proxy=proxy, cookies="auth_token=tok; ct0=csrf"
-    )
+    await pool.add_account("u1", "_", "_", "_", proxy=proxy, cookies="auth_token=tok; ct0=csrf")
     client = QueueClient(pool, "SearchTimeline", impersonate=impersonate)
 
     lines: list[str] = []
