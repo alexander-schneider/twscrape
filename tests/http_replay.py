@@ -89,6 +89,10 @@ def page(*tweets, cursor=None, cursor_type="Bottom", shadows=()):
     }
 
 
+# The signed control read (UserByScreenName "X") answered with usable user data.
+CONTROL_OK = {"data": {"user": {"result": {"__typename": "User", "rest_id": "783214"}}}}
+
+
 def error_body(message, code=-1):
     return {"data": {"user": {}}, "errors": [{"code": code, "message": message}]}
 

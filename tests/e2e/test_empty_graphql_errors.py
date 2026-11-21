@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from tests.http_replay import page, tweet
+from tests.http_replay import CONTROL_OK, page, tweet
 from twscrape import ServiceUnavailableError
 from twscrape.queue_client import DEFAULT_SEARCH_REFUSAL_LOCK_SECONDS, SearchRefusedError
 from twscrape.utils import utc
@@ -38,12 +38,14 @@ async def test_empty_search_error_quarantines_the_only_account(pipeline, empty, 
     now = utc.ts()
     monkeypatch.setattr(utc, "ts", staticmethod(lambda: now))
     wire.enqueue(nested_search_error(empty))
+    wire.enqueue(CONTROL_OK, operation="UserByScreenName")
 
     with pytest.raises(SearchRefusedError, match="Internal server error"):
         async for _ in api.search("example"):
             pass
 
-    assert [request["dummy_account"] for request in wire.requests] == ["offline-0"]
+    assert [request["dummy_account"] for request in wire.requests] == ["offline-0"] * 2
+    assert wire.requests[1]["operation"] == "UserByScreenName"
     account = await api.pool.get("offline-0")
     assert account is not None and account.active and account.locks == refusal_lock(now)
 
@@ -55,6 +57,7 @@ async def test_search_refusal_after_prior_results_keeps_them_and_quarantines(
     now = utc.ts()
     monkeypatch.setattr(utc, "ts", staticmethod(lambda: now))
     wire.enqueue(page(tweet(912), cursor="next"), nested_search_error({}))
+    wire.enqueue(CONTROL_OK, operation="UserByScreenName")
 
     received = []
     with pytest.raises(ServiceUnavailableError, match="Internal server error"):
@@ -62,7 +65,7 @@ async def test_search_refusal_after_prior_results_keeps_them_and_quarantines(
             received.append(item.id)
 
     assert received == [912]
-    assert len(wire.requests) == 2
+    assert len(wire.requests) == 3
     account = await api.pool.get("offline-0")
     assert account is not None and account.active and account.locks == refusal_lock(now)
     assert [item["total_req"] for item in await api.pool.accounts_info()] == [1]
@@ -95,10 +98,16 @@ async def test_empty_search_error_moves_to_a_free_account(pipeline, monkeypatch)
     now = utc.ts()
     monkeypatch.setattr(utc, "ts", staticmethod(lambda: now))
     await add_second_account(api)
-    wire.enqueue(nested_search_error({}), page(tweet(914)))
+    wire.enqueue(nested_search_error({}))
+    wire.enqueue(CONTROL_OK, operation="UserByScreenName")
+    wire.enqueue(page(tweet(914)))
 
     assert [item.id async for item in api.search("example")] == [914]
-    assert [request["dummy_account"] for request in wire.requests] == ["offline-0", "offline-1"]
+    assert [request["dummy_account"] for request in wire.requests] == [
+        "offline-0",
+        "offline-0",
+        "offline-1",
+    ]
     restricted = await api.pool.get("offline-0")
     assert restricted is not None and restricted.active
     assert restricted.locks == refusal_lock(now)
@@ -121,13 +130,16 @@ async def test_search_refused_on_every_account_asks_each_once_and_keeps_them_out
     now = utc.ts()
     monkeypatch.setattr(utc, "ts", staticmethod(lambda: now))
     await add_second_account(api)
-    wire.enqueue(*(nested_search_error({}) for _ in range(2)))
+    for _ in range(2):
+        wire.enqueue(nested_search_error({}))
+        wire.enqueue(CONTROL_OK, operation="UserByScreenName")
 
     with pytest.raises(SearchRefusedError, match="Internal server error"):
         async for _ in api.search("example"):
             pass
 
-    assert [request["dummy_account"] for request in wire.requests] == ["offline-0", "offline-1"]
+    searches = [r for r in wire.requests if r["operation"] == "SearchTimeline"]
+    assert [request["dummy_account"] for request in searches] == ["offline-0", "offline-1"]
     assert (await api.pool.get("offline-0")).locks == refusal_lock(now)
     assert (await api.pool.get("offline-1")).locks == refusal_lock(now)
 
@@ -144,3 +156,19 @@ async def test_reply_error_retries_the_same_account_without_holding_it(pipeline)
     assert [item.id async for item in api.tweet_replies(930)] == [931]
     assert [request["dummy_account"] for request in wire.requests] == ["offline-0", "offline-0"]
     assert (await api.pool.get("offline-0")).locks == {}
+
+
+async def test_search_503_internal_server_error_is_an_outage_not_a_refusal(pipeline):
+    """A 503 that says "Internal server error" is an X outage: retried as before v0.22.0, no control read and
+    no search quarantine."""
+    wire, api = pipeline
+    wire.enqueue(*(nested_search_error({}) for _ in range(3)), status=503)
+
+    with pytest.raises(ServiceUnavailableError, match="Internal server error") as exc_info:
+        async for _ in api.search("example"):
+            pass
+
+    assert not isinstance(exc_info.value, SearchRefusedError)
+    assert [r["operation"] for r in wire.requests] == ["SearchTimeline"] * 3
+    account = await api.pool.get("offline-0")
+    assert account is not None and account.active and account.locks == {}

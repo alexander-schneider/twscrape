@@ -704,6 +704,12 @@ REFUSED = {
     "data": {"search_by_raw_query": {"search_timeline": {}}},
     "errors": [{"code": -1, "message": "Internal server error"}],
 }
+# A usable control read: X's own account with its user id.
+CONTROL_OK = {"data": {"user": {"result": {"__typename": "User", "rest_id": "783214"}}}}
+
+
+def _control_requests(httpx_mock: HTTPXMock) -> list[httpx.Request]:
+    return [r for r in httpx_mock.get_requests() if r.url.path.endswith("/UserByScreenName")]
 
 
 async def test_refused_search_quarantines_the_account_and_moves_on(
@@ -716,11 +722,13 @@ async def test_refused_search_quarantines_the_account_and_moves_on(
     await client.__aenter__()
 
     httpx_mock.add_response(url=URL, json=REFUSED, status_code=200)
+    httpx_mock.add_response(url=CONTROL_URL, json=CONTROL_OK, status_code=200)
     httpx_mock.add_response(url=URL, json={"foo": "ok"}, status_code=200)
 
     rep = await client.get(URL)
 
     assert rep is not None and getattr(rep, "__username", None) == "user2"
+    assert [r.headers["x-csrf-token"] for r in _control_requests(httpx_mock)] == ["csrf1"]
     locks = await _search_lock_hours(pool)
     assert locks["user1"] == 6.0
     assert locks["user2"] <= 0.25  # the normal in-use lock
@@ -736,11 +744,13 @@ async def test_search_refused_for_every_account_stops_without_retrying_them(
 
     for _ in range(2):
         httpx_mock.add_response(url=URL, json=REFUSED, status_code=200)
+        httpx_mock.add_response(url=CONTROL_URL, json=CONTROL_OK, status_code=200)
 
     with pytest.raises(SearchRefusedError, match="Internal server error"):
         await client.get(URL)
 
-    assert [r.headers["x-csrf-token"] for r in httpx_mock.get_requests()] == ["csrf1", "csrf2"]
+    search = [r for r in httpx_mock.get_requests() if r not in _control_requests(httpx_mock)]
+    assert [r.headers["x-csrf-token"] for r in search] == ["csrf1", "csrf2"]
     assert await _search_lock_hours(pool) == {"user1": 6.0, "user2": 6.0}
     assert issubclass(SearchRefusedError, ServiceUnavailableError)
 
@@ -757,7 +767,7 @@ async def test_search_404_after_fresh_signing_is_a_refusal(
 
     for _ in range(3):
         httpx_mock.add_response(url=URL, status_code=404, text="")
-    httpx_mock.add_response(url=CONTROL_URL, json={"data": {"user": {}}}, status_code=200)
+    httpx_mock.add_response(url=CONTROL_URL, json=CONTROL_OK, status_code=200)
     httpx_mock.add_response(url=URL, json={"foo": "ok"}, status_code=200)
 
     rep = await client.get(URL)
@@ -798,11 +808,84 @@ async def test_search_refusal_lock_is_configurable(
     monkeypatch.setenv("TWS_SEARCH_REFUSAL_LOCK_SECONDS", str(24 * 3600))
     await client.__aenter__()
     httpx_mock.add_response(url=URL, json=REFUSED, status_code=200)
+    httpx_mock.add_response(url=CONTROL_URL, json=CONTROL_OK, status_code=200)
     httpx_mock.add_response(url=URL, json={"foo": "ok"}, status_code=200)
 
     await client.get(URL)
 
     assert (await _search_lock_hours(pool))["user1"] == 24.0
+
+
+async def test_search_503_with_internal_server_error_stays_transient(
+    httpx_mock: HTTPXMock, client_fixture: CF, monkeypatch
+):
+    """A synthetic 503 that says "Internal server error" is an X outage, not a refused account: it takes the
+    transient path of v0.21.3 (move to a free account, release the accounts at the end), with no control read
+    and no search quarantine."""
+    pool, client = client_fixture
+    monkeypatch.setattr("twscrape.queue_client.asyncio.sleep", _mock_sleep)
+    monkeypatch.setenv("TWS_RAISE_WHEN_NO_ACCOUNT", "1")  # fail instead of waiting for an account
+    await client.__aenter__()
+    for _ in range(3):
+        httpx_mock.add_response(url=URL, json=REFUSED, status_code=503)
+
+    with pytest.raises(ServiceUnavailableError, match="Internal server error") as exc_info:
+        await client.get(URL)
+
+    assert not isinstance(exc_info.value, SearchRefusedError)
+    assert _control_requests(httpx_mock) == []
+    assert all(hours <= 0.25 for hours in (await _search_lock_hours(pool)).values())
+
+
+@pytest.mark.parametrize(
+    "control",
+    [
+        {"data": {"user": {}}},
+        {"errors": [{"code": -1, "message": "Internal server error"}]},
+        {"data": {"user": {"result": {"__typename": "UserUnavailable"}}}},
+    ],
+)
+async def test_search_refusal_with_a_control_read_without_user_data_is_not_a_search_limit(
+    control, httpx_mock: HTTPXMock, client_fixture: CF, monkeypatch
+):
+    """HTTP 200 alone is no proof that the account still reads: a GraphQL error or an empty user is not usable
+    data. The refused account then cools down for 30 minutes and the request fails, as for a 404 whose control
+    read fails; no search quarantine."""
+    pool, client = client_fixture
+    monkeypatch.setattr("twscrape.queue_client.asyncio.sleep", _mock_sleep)
+    monkeypatch.setenv("TWS_RAISE_WHEN_NO_ACCOUNT", "1")  # fail instead of waiting for an account
+    await client.__aenter__()
+    httpx_mock.add_response(url=URL, json=REFUSED, status_code=200)
+    httpx_mock.add_response(url=CONTROL_URL, json=control, status_code=200)
+
+    with pytest.raises(ServiceUnavailableError) as exc_info:
+        await client.get(URL)
+
+    assert not isinstance(exc_info.value, SearchRefusedError)
+    assert [r.headers["x-csrf-token"] for r in httpx_mock.get_requests()] == ["csrf1"] * 2
+    assert (await _search_lock_hours(pool))["user1"] == 0.5
+
+
+async def test_search_404_with_a_control_read_without_user_data_is_not_a_search_limit(
+    httpx_mock: HTTPXMock, client_fixture: CF, monkeypatch
+):
+    pool, client = client_fixture
+    monkeypatch.setattr("twscrape.queue_client.asyncio.sleep", _mock_sleep)
+    monkeypatch.setenv("TWS_RAISE_WHEN_NO_ACCOUNT", "1")  # fail instead of waiting for an account
+    await client.__aenter__()
+    for _ in range(3):
+        httpx_mock.add_response(url=URL, status_code=404, text="")
+    httpx_mock.add_response(
+        url=CONTROL_URL,
+        json={"errors": [{"code": -1, "message": "Internal server error"}]},
+        status_code=200,
+    )
+
+    with pytest.raises(AbortReqError) as exc_info:
+        await client.get(URL)
+
+    assert not isinstance(exc_info.value, SearchRefusedError)
+    assert (await _search_lock_hours(pool))["user1"] == 0.5
 
 
 async def test_404_on_other_queues_still_aborts(httpx_mock: HTTPXMock, pool_mock: AccountsPool):
