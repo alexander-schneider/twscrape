@@ -345,3 +345,29 @@ async def test_no_fragment_of_an_unparseable_proxy_password_leaks(
     for text in texts:
         for fragment in fragments:
             assert fragment not in text, text
+
+
+@pytest.mark.parametrize("impersonate", [None, "chrome"])
+@pytest.mark.parametrize(
+    "proxy",
+    [
+        f"http://{FAKE_PROXY_USER}:{FAKE_PROXY_PASS}@127.0.0.1:notaport",
+        "http://fakeproxyuser:fakepa%40ss/w0rdsecret@127.0.0.1:9",
+    ],
+)
+async def test_a_clean_transport_error_is_raised_without_context(monkeypatch, impersonate, proxy):
+    """CI runs 44921978929 and 44921942025 failed on Python 3.10 only. There the CurlError that curl-cffi handled
+    inside its awaited coroutine (session.py, `except CurlError`) is still in sys.exc_info() after our except
+    block, so a plain `raise` after the block chained the libcurl error, credentials included, as __context__.
+    On 3.11+ the same code raised without context, so this test is red on 3.10 only."""
+    from twscrape.account import make_transport
+
+    monkeypatch.delenv("TWS_PROXY", raising=False)
+    with pytest.raises(Exception) as exc_info:
+        transport = make_transport(proxy, impersonate)
+        await transport.handle_async_request(
+            httpx.Request("GET", "http://127.0.0.1:9/i/api/graphql/x/SearchTimeline")
+        )
+
+    assert exc_info.value.__context__ is None and exc_info.value.__cause__ is None
+    assert "credentials removed" in str(exc_info.value)
