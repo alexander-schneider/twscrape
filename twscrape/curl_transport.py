@@ -12,7 +12,7 @@ import httpx
 from curl_cffi.requests import AsyncSession
 from curl_cffi.requests.errors import RequestsError
 
-from .redaction import raise_without_context
+from .redaction import proxy_in_use, raise_without_context
 
 # Headers the browser profile sets; httpx defaults and stored account values would contradict it.
 BROWSER_PROFILE_HEADERS = {
@@ -98,9 +98,10 @@ class CurlTransport(httpx.AsyncBaseTransport):
             )
         except RequestsError as error:
             # libcurl echoes the proxy URL (with its userinfo) in some errors: with a proxy, keep only the type.
+            # A proxy from the environment (https_proxy, all_proxy) is as secret as a configured one.
             message = (
                 f"curl-cffi request failed ({type(error).__name__}); details withheld because a proxy is configured"
-                if self._proxy
+                if proxy_in_use(self._proxy)
                 else f"curl-cffi request failed: {error}"
             )
         else:

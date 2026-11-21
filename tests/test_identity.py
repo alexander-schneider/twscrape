@@ -454,3 +454,78 @@ async def test_no_part_of_a_malformed_proxy_reaches_errors_tracebacks_or_logs(
         texts += _exception_texts(error)
         texts.append("".join(traceback.format_exception(type(error), error, error.__traceback__)))
     _assert_no_secret_substring(texts)
+
+
+@pytest.mark.parametrize("proxy", [MALFORMED_PROXIES[0], MALFORMED_PROXIES[3], MALFORMED_PROXIES[5]])
+async def test_an_environment_proxy_counts_as_configured(tmp_path, monkeypatch, proxy):
+    """curl-cffi picks https_proxy/all_proxy from the environment; such a proxy is as secret as a configured one
+    (review round 5 of v0.22.4)."""
+    import traceback
+    from types import SimpleNamespace
+
+    from loguru import logger
+
+    import twscrape.queue_client as queue_client_module
+    from twscrape.account import make_transport
+    from twscrape.accounts_pool import AccountsPool
+    from twscrape.queue_client import QueueClient
+
+    async def no_sleep(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(queue_client_module, "asyncio", SimpleNamespace(sleep=no_sleep))
+    for name in ("TWS_PROXY", "TWS_IMPERSONATE", "http_proxy", "HTTP_PROXY", "ALL_PROXY", "all_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("https_proxy", proxy)
+    monkeypatch.setenv("HTTPS_PROXY", proxy)
+
+    with pytest.raises(Exception) as direct:
+        transport = make_transport(None, "chrome")
+        async with httpx.AsyncClient(transport=transport) as http:
+            await http.get("https://127.0.0.1:9/i/api/graphql/x/SearchTimeline")
+
+    pool = AccountsPool(str(tmp_path / "accounts.db"), raise_when_no_account=True)
+    await pool.add_account("u1", "_", "_", "_", cookies="auth_token=tok; ct0=csrf")
+    client = QueueClient(pool, "SearchTimeline", impersonate="chrome")
+    lines: list[str] = []
+    sink = logger.add(lambda message: lines.append(str(message)), level="TRACE")
+    try:
+        with pytest.raises(Exception) as via_client:
+            await client.get("https://127.0.0.1:9/i/api/graphql/x/SearchTimeline")
+    finally:
+        logger.remove(sink)
+        await client._close_ctx()
+
+    texts = [*lines]
+    for error in (direct.value, via_client.value):
+        texts += _exception_texts(error)
+        texts.append("".join(traceback.format_exception(type(error), error, error.__traceback__)))
+    _assert_no_secret_substring(texts)
+
+
+def test_the_default_log_sink_renders_no_local_variables():
+    """loguru's diagnose mode prints the values of a traceback's local variables, proxy arguments included
+    (review round 5 of v0.22.4). The sink twscrape installs on import must not."""
+    import io
+
+    from twscrape.logger import add_default_sink, logger
+
+    stream = io.StringIO()
+    handler_id = add_default_sink(stream)
+
+    def connect(proxy: str):
+        raise ValueError("boom")
+
+    # Built at run time: the traceback quotes this source line, and only the locals must stay out.
+    password = "".join(reversed("wpterceskaf"))
+    try:
+        try:
+            connect(f"http://u:{password}@127.0.0.1:9")
+        except ValueError:
+            logger.exception("request failed")
+    finally:
+        logger.remove(handler_id)
+
+    err = stream.getvalue()
+    assert "request failed" in err and "boom" in err
+    _assert_no_secret_substring([err])
