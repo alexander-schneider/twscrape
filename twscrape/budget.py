@@ -32,8 +32,8 @@ DAILY_STATS_KEY = "__daily__"  # {"SearchTimeline": {"day": "2026-11-22", "count
 FIRST_USED_STATS_KEY = (
     "__first_used__"  # ISO time of the account's first budgeted request; set once
 )
-# The pacing interval is stretched or shortened by a uniform factor, so the rhythm is not machine-regular.
-JITTER_LOW, JITTER_HIGH = 0.8, 1.2
+# The pacing interval is a minimum, stretched by a uniform factor so the rhythm is not machine-regular.
+JITTER_LOW, JITTER_HIGH = 1.0, 1.4
 
 
 def _parse_entries(name: str, raw: str | None, kind: type) -> dict:
@@ -161,8 +161,8 @@ class AccountBudget:
         return "; ".join(parts)
 
     def pace_seconds(self, queue: str, fraction: float = 1.0) -> float | None:
-        """How long the account stays off `queue` after a request: the interval, divided by the warm-up
-        fraction, times a jitter in 0.8..1.2. None when the queue is not paced."""
+        """How long the account waits after a send before its next send on `queue`: the interval, divided by the
+        warm-up fraction, times a jitter in 1.0..1.4 (never shorter than the interval). None when not paced."""
         interval = self.pacing.get(queue)
         if interval is None:
             return None

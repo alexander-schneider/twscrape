@@ -1,5 +1,6 @@
 import asyncio
 import json
+import math
 import os
 from collections.abc import Awaitable, Callable
 from datetime import datetime
@@ -237,8 +238,10 @@ class Ctx:
         self.failures = {"transport": 0, "loadshed": 0}
         # Called before every request this context sends (budget accounting); set by QueueClient.
         self.before_send: Callable[[], Awaitable[None]] | None = None
-        # Seconds the account stays off the queue after its last request (pacing); None when not paced.
-        self.pace_seconds: float | None = None
+        # Unix time before which this account must not send again on the queue (pacing); None when not paced.
+        self.next_send_at: float | None = None
+        # Fresh x-client-transaction-ids tried on a 404; a paced queue signs once (every send waits the pace).
+        self.signing_attempts = 3
         # Unix seconds until which the account's daily cap on the queue holds it; None below the cap.
         self.cap_until: int | None = None
         # The account's first budgeted request (warm-up clock), read once per context.
@@ -269,7 +272,7 @@ class Ctx:
         path = urlparse(url).path or "/"
 
         tries = 0
-        while tries < 3:
+        while tries < self.signing_attempts:
             gen = await XClIdGenStore.get(
                 self.acc, proxy=self.proxy, fresh=tries > 0, impersonate=self.impersonate
             )
@@ -350,14 +353,22 @@ class QueueClient:
         ctx = Ctx(acc, clt, proxy=self.proxy, impersonate=self.impersonate)
         if self.budget.applies_to(self.queue):
             ctx.before_send = lambda: self._before_send(ctx)
+        if self.queue in self.budget.pacing:
+            ctx.signing_attempts = 1
         return ctx
 
     async def _before_send(self, ctx: "Ctx") -> None:
         """Budget accounting for one request the account is about to send on this queue.
 
-        The daily count is stored before the request goes out (X counts requests, failed ones too). An account
+        On a paced queue it first waits until the account's last send plus its pace, so retries within one
+        context (transport errors) are paced too; across contexts the release lock holds the same minimum. The
+        daily count is stored before the request goes out (X counts requests, failed ones too). An account
         already at its cap sends nothing: DailyCapReached moves the request to another account.
         """
+        if ctx.next_send_at is not None:
+            wait = ctx.next_send_at - utc.now().timestamp()
+            if wait > 0:
+                await asyncio.sleep(wait)
         if ctx.first_used is None:
             ctx.first_used = await self.pool.first_used(ctx.acc.username)
         fraction = self.budget.fraction(ctx.first_used, utc.now())
@@ -370,13 +381,16 @@ class QueueClient:
                 raise DailyCapReached(
                     f"{ctx.acc.username} used its daily cap of {cap} on {self.queue}"
                 )
-        ctx.pace_seconds = self.budget.pace_seconds(self.queue, fraction)
+        pace = self.budget.pace_seconds(self.queue, fraction)
+        if pace is not None:
+            ctx.next_send_at = utc.now().timestamp() + pace
 
     def _budget_floor(self, ctx: "Ctx") -> int:
-        """The earliest the account may use this queue again under its budget (unix seconds), or 0."""
+        """The earliest the account may use this queue again under its budget (unix seconds), or 0: the end of
+        its cap day, or its last send plus its pace (rounded up, as locks have whole seconds)."""
         floor = ctx.cap_until or 0
-        if ctx.pace_seconds is not None:
-            floor = max(floor, utc.ts() + int(round(ctx.pace_seconds)))
+        if ctx.next_send_at is not None:
+            floor = max(floor, math.ceil(ctx.next_send_at))
         return floor
 
     async def _release_held(self, usernames: list[str]) -> None:
