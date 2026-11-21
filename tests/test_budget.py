@@ -13,6 +13,7 @@ Ways this can fail, covered below:
 """
 
 import json
+import re
 from datetime import datetime, timedelta, timezone
 
 import httpx
@@ -111,6 +112,8 @@ def test_pool_reads_the_budget_at_creation(tmp_path, monkeypatch):
 # --- pacing -------------------------------------------------------------------------------------------------
 
 URL = "https://example.com/api"
+CONTROL_URL = re.compile(r"https://x\.com/i/api/graphql/[^/]+/UserByScreenName\?.*")
+CONTROL_OK = {"data": {"user": {"result": {"__typename": "User", "rest_id": "783214"}}}}
 SEARCH_PAGE = {"data": {"search_by_raw_query": {"search_timeline": {"timeline": {"x": 1}}}}}
 
 
@@ -134,20 +137,27 @@ async def lock_seconds(pool: AccountsPool, username: str, queue="SearchTimeline"
     return 0.0 if lock is None else (lock - utc.now()).total_seconds()
 
 
-def test_jitter_stays_within_0_8_and_1_2_and_is_not_constant():
+def test_jitter_only_stretches_the_interval_and_is_not_constant():
+    """Review round 1 (P1): a 0.8..1.2 jitter let 60 s become 48 s. The interval is a minimum: 1.0..1.4."""
     budget = AccountBudget(pacing={"SearchTimeline": 60.0})
     samples = [budget.pace_seconds("SearchTimeline") or 0.0 for _ in range(2000)]
-    assert all(48.0 <= s <= 72.0 for s in samples)
+    assert all(60.0 <= s <= 84.0 for s in samples)
     assert max(samples) - min(samples) > 15  # spread over the range, not one machine-regular value
     assert budget.pace_seconds("TweetDetail") is None
 
 
-@pytest.mark.parametrize("jitter", [0.8, 1.2])
+@pytest.mark.parametrize("jitter", [1.0, 1.4])
 async def test_a_paced_request_locks_the_account_for_interval_times_jitter(
     httpx_mock: HTTPXMock, tmp_path, monkeypatch, jitter
 ):
     pool = await make_pool(tmp_path, monkeypatch, TWS_ACCOUNT_PACING="SearchTimeline=60")
-    monkeypatch.setattr("twscrape.budget.random.uniform", lambda low, high: jitter)
+    bounds = []
+
+    def fixed_jitter(low, high):
+        bounds.append((low, high))
+        return jitter
+
+    monkeypatch.setattr("twscrape.budget.random.uniform", fixed_jitter)
     client = QueueClient(pool, "SearchTimeline")
     httpx_mock.add_response(url=URL, json=SEARCH_PAGE)
     httpx_mock.add_response(url=URL, json=SEARCH_PAGE)
@@ -159,7 +169,8 @@ async def test_a_paced_request_locks_the_account_for_interval_times_jitter(
 
     assert getattr(first, "__username") == "user1" and getattr(second, "__username") == "user2"
     for username in ("user1", "user2"):
-        assert 60 * jitter - 2 <= await lock_seconds(pool, username) <= 60 * jitter
+        assert 60 * jitter - 2 <= await lock_seconds(pool, username) <= 60 * jitter + 1
+    assert set(bounds) == {(1.0, 1.4)}
 
 
 async def test_a_failed_request_is_paced_too_and_pacing_beats_a_shorter_cooldown(
@@ -178,7 +189,7 @@ async def test_a_failed_request_is_paced_too_and_pacing_beats_a_shorter_cooldown
         with pytest.raises(Exception):
             await client.get(URL)
 
-    assert 480 - 2 <= await lock_seconds(pool, "user1") <= 720
+    assert 600 - 2 <= await lock_seconds(pool, "user1") <= 840 + 1
 
 
 async def test_a_longer_lock_wins_over_pacing(httpx_mock: HTTPXMock, tmp_path, monkeypatch):
@@ -217,7 +228,7 @@ async def test_accounts_given_up_after_a_transient_error_keep_their_pacing_lock(
             await client.get(URL)
 
     for username in ("user1", "user2"):
-        assert 480 - 2 <= await lock_seconds(pool, username) <= 720
+        assert 600 - 2 <= await lock_seconds(pool, username) <= 840 + 1
 
 
 async def test_without_pacing_the_account_is_kept_for_the_next_request(
@@ -689,3 +700,72 @@ async def test_without_a_budget_accounts_info_is_unchanged(tmp_path, monkeypatch
     pool = await make_pool(tmp_path, monkeypatch, accounts=1)
     (item,) = await pool.accounts_info()
     assert "budget" not in item
+
+
+# --- pacing before every send -------------------------------------------------------------------------------
+
+
+class FakeClock:
+    """utc.now() and asyncio.sleep on one clock, so a pacing wait shows up as elapsed time."""
+
+    def __init__(self, monkeypatch):
+        self.t = utc.now().timestamp()
+        monkeypatch.setattr(
+            utc, "now", staticmethod(lambda: datetime.fromtimestamp(self.t, timezone.utc))
+        )
+
+        async def sleep(seconds, *args, **kwargs):
+            self.t += max(0.0, seconds)
+
+        monkeypatch.setattr("twscrape.queue_client.asyncio.sleep", sleep)
+
+
+async def test_retries_within_one_context_wait_for_the_pacing_interval(
+    httpx_mock: HTTPXMock, tmp_path, monkeypatch
+):
+    """Review round 1 (P1): the pacing lock only applied when the context was released, so a transport retry
+    went out right after the failed send. Every send of a paced account waits for last send + interval."""
+    pool = await make_pool(
+        tmp_path, monkeypatch, accounts=1, TWS_ACCOUNT_PACING="SearchTimeline=60"
+    )
+    clock = FakeClock(monkeypatch)
+    sent_at = []
+
+    async def respond(request: httpx.Request) -> httpx.Response:
+        sent_at.append(clock.t)
+        if len(sent_at) == 1:
+            raise httpx.ReadTimeout("slow", request=request)
+        return httpx.Response(200, json=SEARCH_PAGE)
+
+    httpx_mock.add_callback(respond, url=URL, is_reusable=True)
+
+    async with QueueClient(pool, "SearchTimeline") as client:
+        rep = await client.get(URL)
+
+    assert getattr(rep, "__username") == "user1" and len(sent_at) == 2
+    assert sent_at[1] - sent_at[0] >= 60
+    # Across contexts: the account is locked until at least its last send plus the interval.
+    lock = (await pool.get("user1")).locks["SearchTimeline"]
+    assert lock.timestamp() >= sent_at[1] + 60
+
+
+async def test_a_paced_search_signs_once_and_a_404_still_takes_the_refusal_path(
+    httpx_mock: HTTPXMock, tmp_path, monkeypatch
+):
+    """Three signature attempts on a 404 would take 3 x interval (30 min on warm-up day 0). A paced queue signs
+    once; the 404 then goes to the control read and the account is quarantined from search as before."""
+    pool = await make_pool(tmp_path, monkeypatch, TWS_ACCOUNT_PACING="SearchTimeline=60")
+    httpx_mock.add_response(url=URL, status_code=404, text="")
+    httpx_mock.add_response(url=CONTROL_URL, json=CONTROL_OK)
+    httpx_mock.add_response(url=URL, json=SEARCH_PAGE)
+
+    async with QueueClient(pool, "SearchTimeline") as client:
+        rep = await client.get(URL)
+
+    assert getattr(rep, "__username") == "user2"
+    sent = [
+        (r.url.path.rsplit("/", 1)[-1], r.headers["x-csrf-token"])
+        for r in httpx_mock.get_requests()
+    ]
+    assert sent == [("api", "csrf1"), ("UserByScreenName", "csrf1"), ("api", "csrf2")]
+    assert 1800 - 5 <= await lock_seconds(pool, "user1") <= 1800  # first refusal: 30 minutes
