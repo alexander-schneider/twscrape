@@ -944,14 +944,20 @@ async def test_every_search_5xx_is_transient_whatever_the_body(
     assert await _search_lock_hours(pool) == {}
 
 
-@pytest.mark.parametrize(
-    "control",
-    [
-        {"data": {"user": {}}},
-        {"errors": [{"code": -1, "message": "Internal server error"}]},
-        {"data": {"user": {"result": {"__typename": "UserUnavailable"}}}},
-    ],
-)
+CONTROLS_WITHOUT_USER_DATA = [
+    {"json": {"data": {"user": {}}}},
+    {"json": {"errors": [{"code": -1, "message": "Internal server error"}]}},
+    {"json": {"data": {"user": {"result": {"__typename": "UserUnavailable"}}}}},
+    {"json": {"data": None}},
+    {"json": {"data": {"user": None}}},
+    {"json": {"data": {"user": {"result": None}}}},
+    {"json": {"data": []}},
+    {"json": None},
+    {"text": "{not json"},
+]
+
+
+@pytest.mark.parametrize("control", CONTROLS_WITHOUT_USER_DATA)
 async def test_search_refusal_with_a_control_read_without_user_data_is_not_a_search_limit(
     control, httpx_mock: HTTPXMock, client_fixture: CF, monkeypatch
 ):
@@ -963,7 +969,7 @@ async def test_search_refusal_with_a_control_read_without_user_data_is_not_a_sea
     monkeypatch.setenv("TWS_RAISE_WHEN_NO_ACCOUNT", "1")  # fail instead of waiting for an account
     await client.__aenter__()
     httpx_mock.add_response(url=URL, json=REFUSED, status_code=200)
-    httpx_mock.add_response(url=CONTROL_URL, json=control, status_code=200)
+    httpx_mock.add_response(url=CONTROL_URL, status_code=200, **control)
 
     with pytest.raises(ServiceUnavailableError) as exc_info:
         await client.get(URL)
@@ -973,8 +979,9 @@ async def test_search_refusal_with_a_control_read_without_user_data_is_not_a_sea
     assert (await _search_lock_hours(pool))["user1"] == 0.5
 
 
+@pytest.mark.parametrize("control", CONTROLS_WITHOUT_USER_DATA)
 async def test_search_404_with_a_control_read_without_user_data_is_not_a_search_limit(
-    httpx_mock: HTTPXMock, client_fixture: CF, monkeypatch
+    control, httpx_mock: HTTPXMock, client_fixture: CF, monkeypatch
 ):
     pool, client = client_fixture
     monkeypatch.setattr("twscrape.queue_client.asyncio.sleep", _mock_sleep)
@@ -982,11 +989,7 @@ async def test_search_404_with_a_control_read_without_user_data_is_not_a_search_
     await client.__aenter__()
     for _ in range(3):
         httpx_mock.add_response(url=URL, status_code=404, text="")
-    httpx_mock.add_response(
-        url=CONTROL_URL,
-        json={"errors": [{"code": -1, "message": "Internal server error"}]},
-        status_code=200,
-    )
+    httpx_mock.add_response(url=CONTROL_URL, status_code=200, **control)
 
     with pytest.raises(AbortReqError) as exc_info:
         await client.get(URL)
