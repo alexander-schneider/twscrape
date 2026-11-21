@@ -20,6 +20,11 @@ class NoAccountError(Exception):
     pass
 
 
+class BudgetExhaustedError(NoAccountError):
+    """No account is free and at least one is held by its daily cap (TWS_ACCOUNT_DAILY_CAPS): the pool is out of
+    capacity for today, not refused by X."""
+
+
 class AccountInfo(TypedDict):
     username: str
     logged_in: bool
@@ -467,6 +472,13 @@ class AccountsPool:
 
             if give_up:
                 if raise_no_account:
+                    capped = await self.accounts_held_by_cap(queue)
+                    if capped:
+                        cap = self.budget.daily_caps[queue]
+                        raise BudgetExhaustedError(
+                            f"No account available for queue {queue}: {len(capped)} account(s) used "
+                            f"their daily cap ({queue}={cap} per UTC day, less during warm-up)"
+                        )
                     raise NoAccountError(f"No account available for queue {queue}")
                 if no_active:
                     logger.warning("No active accounts. Stopping...")
@@ -483,6 +495,30 @@ class AccountsPool:
                 self._wait_interval if remaining is None else min(self._wait_interval, remaining)
             )
             await asyncio.sleep(interval)
+
+    async def accounts_held_by_cap(self, queue: str) -> list[str]:
+        """Active accounts whose count today (UTC) has reached their cap on `queue`, warm-up included."""
+        if queue not in self.budget.daily_caps:
+            return []
+        rs = await fetchall(
+            self._db_file, "SELECT username, stats FROM accounts WHERE active = true"
+        )
+        now = utc.now()
+        today = utc_day(now)
+        capped = []
+        for row in rs:
+            stats = json.loads(row["stats"] or "{}")
+            daily = (stats.get(DAILY_STATS_KEY) or {}).get(queue)
+            if not isinstance(daily, dict) or daily.get("day") != today:
+                continue
+            first_used = stats.get(FIRST_USED_STATS_KEY)
+            fraction = self.budget.fraction(
+                utc.from_iso(first_used) if isinstance(first_used, str) else None, now
+            )
+            cap = self.budget.cap_for(queue, fraction)
+            if cap is not None and isinstance(daily.get("count"), int) and daily["count"] >= cap:
+                capped.append(row["username"])
+        return capped
 
     async def _earliest_unlock(self, queue: str) -> str | None:
         """When the first locked active account is free for `queue`: per account the later of its `queue` lock and
