@@ -143,7 +143,7 @@ them and raises. Other operations retry the same account.
 
 A refused search is an HTTP 200 SearchTimeline answer with `(-1) Internal server
 error` and no timeline data, or HTTP 404 after three fresh
-x-client-transaction-ids. Before it counts, one signed control read
+x-client-transaction-ids (one on a paced queue, see below). Before it counts, one signed control read
 (UserByScreenName `X`) must return user data (`data.user.result.rest_id`). Then
 the account is locked for search: 30 minutes for its first refusal, doubled for
 each consecutive refusal up to 6 hours (see the `TWS_SEARCH_REFUSAL_*` variables).
@@ -240,25 +240,43 @@ export TWS_WARMUP_DAYS=14                                   # new accounts ramp 
 export TWS_WARMUP_START_FRACTION=0.1                        # ...starting at 10 % of the budget
 ```
 
-- **Pacing.** After every request of an account on a paced queue, success or
-  failure, its lock for that queue is at least the interval times a random
-  factor in 0.8..1.2. A longer lock (rate limit, refusal, cooldown) wins. The
-  account goes back to the pool after each request, so the next page of a
-  search goes to the next free account. Waiting requests wait for a paced
-  account as for one in use; with `raise_when_no_account` and no
+- **Pacing.** The interval is a minimum between two sends of one account on a
+  paced queue, stretched by a random factor in 1.0..1.4. Every send waits for
+  the account's last send plus that pace, also retries within one request
+  (transport errors); when the account goes back to the pool its lock for the
+  queue lasts at least that long, so the minimum also holds across requests and
+  processes. A longer lock (rate limit, refusal, cooldown) wins. The account
+  goes back to the pool after each request, so the next page of a search goes to
+  the next free account. A paced queue signs a request once: a 404 is not
+  retried with fresh x-client-transaction-ids (three attempts would take three
+  intervals); a search 404 still goes to the control read and the refusal path.
+  Waiting requests wait for a paced account as for one in use, while the wait
+  is under about 16 minutes; with `raise_when_no_account` and no
   `wait_timeout`, they raise at once, as before.
 - **Daily caps.** Every request sent on a capped queue is counted before it is
   sent (failed ones too, as X counts them), per UTC day, in the account's stats
   in `accounts.db`. The request that reaches the cap is sent; then the account's
-  queue is locked until the next UTC midnight. When no account is free and at
-  least one is held by its cap, `raise_when_no_account` raises
-  `BudgetExhaustedError` (a `NoAccountError`) instead of `NoAccountError`:
-  the pool is out of capacity for today, X did not refuse anything.
+  queue is locked until the next UTC midnight. When no account is free and
+  every active account is held on that queue by its cap, `raise_when_no_account`
+  raises `BudgetExhaustedError` (a `NoAccountError`): the pool is out of
+  capacity for today. If any account is held by something else (a refusal, a
+  cooldown, a rate limit), it raises the plain `NoAccountError`, since that may
+  be an outage.
 - **Warm-up.** An account's age is counted from its first request under a
-  budget (stored once as `__first_used__`). Its fraction is
+  budget (stored once as `__first_used__`) to the start of the current UTC day,
+  so its cap and pace stay the same all day and step at midnight. Its fraction is
   `start + (1 - start) x min(1, age / days)`; the interval is divided by it and
   the cap multiplied by it (floor, at least 1). With the example above, a new
-  account waits 600 s between searches and sends at most 40 on its first day.
+  account waits at least 600 s between searches and sends at most 40 on its
+  first day.
+
+`API.search` and `API.search_raw` take `max_pages` to cap the requests of one
+call: every page request counts, also the cursor-only pages followed on their
+own. While search is paced, `max_pages=1` keeps a search to one request:
+
+```python
+tweets = [t async for t in api.search("$NVDA lang:en", max_pages=1)]
+```
 
 Accounts added before v0.23.0 also start their warm-up clock on their first
 request under v0.23.0, so set `TWS_WARMUP_DAYS` only when every existing account
@@ -277,7 +295,7 @@ Invalid values raise a `ValueError` naming the variable when the `API` or
 | `TWS_IMPERSONATE` | Browser profile for curl-cffi, e.g. `chrome`. Sends requests with that browser's TLS and HTTP/2 fingerprint and user agent. Unset keeps plain HTTPX. Same as `API(impersonate=...)`. |
 | `TWS_SEARCH_REFUSAL_FIRST_LOCK_SECONDS` | How long an account stays out of search after its first refused search. Each consecutive refusal of the same account doubles the lock, up to `TWS_SEARCH_REFUSAL_LOCK_SECONDS`. Default `1800` (30 minutes). |
 | `TWS_SEARCH_REFUSAL_LOCK_SECONDS` | The longest search lock after consecutive refused searches of one account. Default `21600` (6 hours). With both defaults the locks are 30 min, 1 h, 2 h, 4 h, 6 h, 6 h... |
-| `TWS_ACCOUNT_PACING` | Minimum seconds between two requests of one account per queue, e.g. `SearchTimeline=60,UserTweets=15`, with 0.8..1.2 jitter. Unset: no pacing. |
+| `TWS_ACCOUNT_PACING` | Minimum seconds between two requests of one account per queue, e.g. `SearchTimeline=60,UserTweets=15`, stretched by a random 1.0..1.4. Unset: no pacing. |
 | `TWS_ACCOUNT_DAILY_CAPS` | Requests per account, queue and UTC day, e.g. `SearchTimeline=400`. At the cap the queue is locked until UTC midnight. Unset: no caps. |
 | `TWS_WARMUP_DAYS` | Days over which a new account ramps up from `TWS_WARMUP_START_FRACTION` to the full pacing and caps. Default `0` (off). |
 | `TWS_WARMUP_START_FRACTION` | Share of the budget on an account's first day, in (0, 1]. Default `0.1`. |

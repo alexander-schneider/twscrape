@@ -11,14 +11,21 @@ behaviour stays as in v0.22.x.
 ### Added
 
 - Per-account pacing: `TWS_ACCOUNT_PACING="SearchTimeline=60,UserTweets=15"`.
-  After every request of an account on a paced queue (success or failure), its
-  lock for that queue is at least the interval times a uniform jitter in
-  0.8..1.2; a longer lock wins. A paced account is released after each request,
-  so the next page goes to the next free account, and accounts given up after a
-  transient error keep their pacing lock.
+  The interval is a minimum between two sends of one account on that queue,
+  stretched by a uniform jitter in 1.0..1.4. Every send, retries within one
+  request included, waits for the account's last send plus its pace; the lock
+  set when the account is released lasts at least as long, so the minimum also
+  holds across requests and processes. A longer lock wins. A paced account is
+  released after each request, so the next page goes to the next free account,
+  and accounts given up after a transient error keep their pacing lock. A paced
+  queue signs once: a 404 is not retried with fresh x-client-transaction-ids
+  (three attempts would take three intervals), and a search 404 still goes to
+  the control read and the refusal path.
 - Daily caps: `TWS_ACCOUNT_DAILY_CAPS="SearchTimeline=400"`, requests per
   account, queue and UTC day. Each request is counted before it is sent, failed
-  ones too, in one UPDATE that also checks the cap, in the account's stats as
+  ones too, by one UPDATE that also checks the cap and a read of its own result
+  in the same transaction (concurrent requests each get their count), in the
+  account's stats as
   `{"__daily__": {"SearchTimeline": {"day": "2026-11-22", "count": 12}}}`. The
   request that reaches the cap is sent, then the queue is locked until the next
   UTC midnight. An account found at its cap sends nothing and the request moves
@@ -26,12 +33,19 @@ behaviour stays as in v0.22.x.
 - Warm-up: `TWS_WARMUP_DAYS` (default 0 = off) and `TWS_WARMUP_START_FRACTION`
   (default 0.1). The first budgeted request stores `__first_used__` once; the
   fraction `start + (1 - start) x min(1, age / days)` divides the interval and
-  multiplies the cap (floor, at least 1). Accounts added before v0.23.0 start
-  their clock on their first request under v0.23.0.
+  multiplies the cap (floor, at least 1). Age is counted to the start of the
+  current UTC day, so cap and pace stay the same all day and step at midnight;
+  a cap reached in the morning still holds in the evening. Accounts added before
+  v0.23.0 start their clock on their first request under v0.23.0.
 - `BudgetExhaustedError(NoAccountError)`, exported from `twscrape`: raised
-  instead of `NoAccountError` when no account is free and at least one active
-  account is held by today's cap on the queue. It means out of capacity, not
-  refused by X.
+  instead of `NoAccountError` when no account is free and every active account
+  is held by today's cap on the queue. It means out of capacity, not refused by
+  X. If any account is held by something else (refusal, cooldown, rate limit),
+  the error stays `NoAccountError`, so an outage is not reported as capacity.
+- `API.search(q, limit=-1, kv=None, max_pages=None)` and `API.search_raw` cap
+  the HTTP requests of one call with `max_pages`, counting every page request,
+  also the cursor-only pages followed on their own. `max_pages=1` sends exactly
+  one SearchTimeline request. Default `None` pages as before.
 - `twscrape accounts` shows, with a budget set, each account's count today,
   effective cap and effective interval.
 - Malformed budget variables raise a `ValueError` naming the variable when the
