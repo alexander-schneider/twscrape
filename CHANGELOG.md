@@ -1,5 +1,49 @@
 # Changelog
 
+## v0.22.1 - 2026-11-21
+
+A review of v0.22.0 found that one short X-wide error could keep a whole pool
+out of search for 6 hours, and that a malformed proxy could log its
+credentials.
+
+### Fixed
+
+- Proxy credentials no longer reach logs or raised errors. libcurl puts the
+  proxy URL into some errors (for example a malformed port), and the queue
+  client logged that text at WARNING. Every transport error, for curl-cffi and
+  for plain httpx, now has the userinfo of any URL and the literal proxy
+  username and password replaced with `***`.
+- Only an HTTP 200 SearchTimeline answer with `(-1) Internal server error` and
+  no timeline data is a refused search. A 5xx with the same text takes the
+  temporary-failure path again (move to a free account, release the accounts
+  at the end), as before v0.22.0.
+- Both refusal shapes (that 200 answer and the 404 after three fresh
+  x-client-transaction-ids) go through the signed control read
+  (UserByScreenName `X`). It counts only with user data
+  (`data.user.result.rest_id`), not with any HTTP 200. Without it the account
+  cools down for 30 minutes and the request fails: `NotFoundAfterSigningError`
+  for the 404, `ServiceUnavailableError` for the 200 answer.
+- `get_for_queue_or_wait` gives up at once when an account's global lock has
+  ended but its queue lock still runs for hours. Per account the later of its
+  queue lock and its global lock now counts, then the earliest account. Before,
+  the expired global lock read as "available now" and the request waited out
+  its full timeout.
+
+### Changed
+
+- The search refusal lock escalates per account instead of a flat 6 hours. The
+  first refusal locks SearchTimeline for `TWS_SEARCH_REFUSAL_FIRST_LOCK_SECONDS`
+  (new, default 30 minutes); each consecutive refusal of the same account
+  doubles it, capped at `TWS_SEARCH_REFUSAL_LOCK_SECONDS` (default 6 hours):
+  30 min, 1 h, 2 h, 4 h, 6 h, 6 h. A 2-minute X-wide error thus costs each
+  account 30 minutes, and a limited account reaches 6 hours after a few probes.
+  The count is stored in `accounts.db`, in the account's `stats` JSON as
+  `{"__search_refusals__": {"SearchTimeline": n}}`; the request counters and the
+  `Account` model skip it. It goes back to 0 when the account completes a
+  search with timeline data. Saving a loaded `Account` (for example after a
+  login) also resets it.
+- CI tests Python 3.14.
+
 ## v0.22.0 - 2026-11-21
 
 X stopped serving search to every account of a production pool on 2026-11-21

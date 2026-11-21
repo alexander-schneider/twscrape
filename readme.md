@@ -141,6 +141,19 @@ failing account for search for five minutes. Without a free account, the request
 retries the current one. If every account it tried fails, the request releases
 them and raises. Other operations retry the same account.
 
+A refused search is an HTTP 200 SearchTimeline answer with `(-1) Internal server
+error` and no timeline data, or HTTP 404 after three fresh
+x-client-transaction-ids. Before it counts, one signed control read
+(UserByScreenName `X`) must return user data (`data.user.result.rest_id`). Then
+the account is locked for search: 30 minutes for its first refusal, doubled for
+each consecutive refusal up to 6 hours (see the `TWS_SEARCH_REFUSAL_*` variables).
+The count of consecutive refusals is stored per account in `accounts.db` and
+goes back to 0 when the account completes a search with timeline data. If the
+control read returns no user data, the account cools down for 30 minutes and the
+request fails. A 5xx answer is never a refusal; it takes the temporary-failure
+path above. The request moves to a free account after a refusal and raises
+`SearchRefusedError` (a `ServiceUnavailableError`) without one.
+
 `AbortReqError` and `XClIdParseError` are also exported from `twscrape`. Requests
 raise these errors when aborted or when transaction-ID parsing fails, instead of
 returning an empty result. Both raw and parsed methods propagate the original
@@ -218,7 +231,8 @@ python -m pip install "httpx[socks]"
 | --- | --- |
 | `TWS_PROXY` | Fallback proxy URL for accounts without their own proxy and without an API proxy. |
 | `TWS_IMPERSONATE` | Browser profile for curl-cffi, e.g. `chrome`. Sends requests with that browser's TLS and HTTP/2 fingerprint and user agent. Unset keeps plain HTTPX. Same as `API(impersonate=...)`. |
-| `TWS_SEARCH_REFUSAL_LOCK_SECONDS` | How long an account stays out of search after X refused a search for it. Default `21600` (6 hours). |
+| `TWS_SEARCH_REFUSAL_FIRST_LOCK_SECONDS` | How long an account stays out of search after its first refused search. Each consecutive refusal of the same account doubles the lock, up to `TWS_SEARCH_REFUSAL_LOCK_SECONDS`. Default `1800` (30 minutes). |
+| `TWS_SEARCH_REFUSAL_LOCK_SECONDS` | The longest search lock after consecutive refused searches of one account. Default `21600` (6 hours). With both defaults the locks are 30 min, 1 h, 2 h, 4 h, 6 h, 6 h... |
 | `TWS_WAIT_EMAIL_CODE` | Email verification timeout in seconds. Default `30`. |
 | `TWS_RAISE_WHEN_NO_ACCOUNT` | Raise when no account is available. Accepts `true`/`1` or `false`/`0`. Default `false`. |
 
