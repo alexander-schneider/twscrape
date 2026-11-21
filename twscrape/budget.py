@@ -12,6 +12,7 @@ from the environment once, when an AccountsPool is created; everything is off wh
 
 import math
 import os
+import random
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -23,6 +24,8 @@ WARMUP_START_FRACTION_ENV = "TWS_WARMUP_START_FRACTION"
 DEFAULT_WARMUP_START_FRACTION = 0.1
 # Queue names are GraphQL operation names; they end up in JSON paths, so nothing else is accepted.
 _QUEUE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+# The pacing interval is stretched or shortened by a uniform factor, so the rhythm is not machine-regular.
+JITTER_LOW, JITTER_HIGH = 0.8, 1.2
 
 
 def _parse_entries(name: str, raw: str | None, kind: type) -> dict:
@@ -97,3 +100,11 @@ class AccountBudget:
 
     def applies_to(self, queue: str) -> bool:
         return queue in self.pacing or queue in self.daily_caps
+
+    def pace_seconds(self, queue: str, fraction: float = 1.0) -> float | None:
+        """How long the account stays off `queue` after a request: the interval, divided by the warm-up
+        fraction, times a jitter in 0.8..1.2. None when the queue is not paced."""
+        interval = self.pacing.get(queue)
+        if interval is None:
+            return None
+        return interval / fraction * random.uniform(JITTER_LOW, JITTER_HIGH)

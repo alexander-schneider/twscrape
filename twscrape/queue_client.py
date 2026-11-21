@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+from collections.abc import Awaitable, Callable
 from typing import Any
 from urllib.parse import urlparse
 
@@ -194,6 +195,10 @@ class Ctx:
         self.proxy = proxy
         self.impersonate = impersonate
         self.failures = {"transport": 0, "loadshed": 0}
+        # Called before every request this context sends (budget accounting); set by QueueClient.
+        self.before_send: Callable[[], Awaitable[None]] | None = None
+        # Seconds the account stays off the queue after its last request (pacing); None when not paced.
+        self.pace_seconds: float | None = None
 
     async def retry(self, kind: str, limit: int) -> bool:
         self.failures[kind] += 1
@@ -225,6 +230,8 @@ class Ctx:
                 self.acc, proxy=self.proxy, fresh=tries > 0, impersonate=self.impersonate
             )
             hdr = {"x-client-transaction-id": gen.calc(method, path)}
+            if self.before_send is not None:
+                await self.before_send()
             rep = await self.clt.request(method, url, params=params, json=json, headers=hdr)
             if rep.status_code != 404:
                 return rep
@@ -290,10 +297,35 @@ class QueueClient:
         self.ctx: Ctx | None = None
         self.proxy = proxy
         self.impersonate = impersonate
+        self.budget = pool.budget
+        # Until when each account released by this client is paced (unix seconds); see _release_held.
+        self._pace_floors: dict[str, int] = {}
 
     def _ctx_for(self, acc: Account) -> "Ctx":
         clt = acc.make_client(proxy=self.proxy, impersonate=self.impersonate)
-        return Ctx(acc, clt, proxy=self.proxy, impersonate=self.impersonate)
+        ctx = Ctx(acc, clt, proxy=self.proxy, impersonate=self.impersonate)
+        if self.budget.applies_to(self.queue):
+            ctx.before_send = lambda: self._before_send(ctx)
+        return ctx
+
+    async def _before_send(self, ctx: "Ctx") -> None:
+        """Budget accounting for one request the account is about to send on this queue."""
+        ctx.pace_seconds = self.budget.pace_seconds(self.queue)
+
+    def _budget_floor(self, ctx: "Ctx") -> int:
+        """The earliest the account may use this queue again under its budget (unix seconds), or 0."""
+        if ctx.pace_seconds is None:
+            return 0
+        return utc.ts() + int(round(ctx.pace_seconds))
+
+    async def _release_held(self, usernames: list[str]) -> None:
+        """Release accounts given up after a transient error, but not before their pacing ends."""
+        for username in usernames:
+            floor = self._pace_floors.get(username, 0)
+            if floor > utc.ts():
+                await self.pool.lock_until(username, self.queue, floor)
+            else:
+                await self.pool.unlock(username, self.queue)
 
     async def __aenter__(self):
         await self._get_ctx()
@@ -319,6 +351,12 @@ class QueueClient:
         if inactive:
             await self.pool.mark_inactive(username, msg, queue=self.queue, req_count=ctx.req_count)
             return
+
+        # Pacing (and caps) hold the account at least this long; a longer lock set by the caller wins.
+        floor = self._budget_floor(ctx)
+        if floor:
+            self._pace_floors[username] = floor
+            reset_at = max(reset_at, floor)
 
         if reset_at > 0:
             if global_lock:
@@ -645,6 +683,9 @@ class QueueClient:
                 ctx.req_count += 1  # count only successful
                 ctx.reset_failures()
                 unknown_retry, transient_api_retry = 0, 0
+                if self._budget_floor(ctx):
+                    # A paced account goes back to the pool with its lock; the next page takes the next one.
+                    await self._close_ctx()
                 return rep
             except NotFoundAfterSigningError as e:
                 if self.queue != SEARCH_QUEUE:
@@ -672,8 +713,7 @@ class QueueClient:
                 transient_api_retry += 1
                 if transient_api_retry >= TRANSIENT_API_ERROR_RETRY_LIMIT:
                     # Every account tried failed, so X failed as a whole: release them.
-                    for username in held:
-                        await self.pool.unlock(username, self.queue)
+                    await self._release_held(held)
                     raise e
                 # X refuses SearchTimeline for some accounts only (vladkens/twscrape#367).
                 # Other operations keep retrying the same account.
