@@ -67,8 +67,8 @@ async def test_reader_searches_unique_posts_and_fetches_direct_replies(pipeline)
         (104, "An invented answer", 101)
     ]
     assert [(request["method"], request["path"]) for request in wire.requests] == [
-        ("POST", "/i/api/graphql/vLHjqbDv7TPFMBkIIO1nOA/SearchTimeline"),
-        ("POST", "/i/api/graphql/vLHjqbDv7TPFMBkIIO1nOA/SearchTimeline"),
+        ("GET", "/i/api/graphql/vLHjqbDv7TPFMBkIIO1nOA/SearchTimeline"),
+        ("GET", "/i/api/graphql/vLHjqbDv7TPFMBkIIO1nOA/SearchTimeline"),
         ("GET", "/i/api/graphql/dQDdKtt882nl-Km98FJGSQ/TweetDetail"),
     ]
     assert wire.requests[0]["payload"]["variables"]["rawQuery"] == "hello lang:en"

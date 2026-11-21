@@ -136,7 +136,7 @@ async def login_two_factor_auth_challenge(ctx: TaskCtx) -> Response:
     if ctx.acc.mfa_code is None:
         raise ValueError("MFA code is required")
 
-    totp = pyotp.TOTP(ctx.acc.mfa_code)
+    totp = pyotp.totp.TOTP(ctx.acc.mfa_code)
     payload = {
         "flow_token": ctx.prev["flow_token"],
         "subtask_inputs": [

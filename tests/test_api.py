@@ -150,13 +150,13 @@ async def test_gql_items_stops_on_repeated_search_page(api_mock: API, monkeypatc
 
         async def get(self, url, params=None):
             calls.append(("get", url, params))
-            raise AssertionError("SearchTimeline should use POST")
-
-        async def post(self, url, json=None):
-            calls.append(("post", url, json))
             if not pages:
                 raise AssertionError("unexpected extra pagination request")
             return pages.pop(0)
+
+        async def post(self, url, json=None):
+            calls.append(("post", url, json))
+            raise AssertionError("SearchTimeline should use GET like the x.com web client")
 
     monkeypatch.setattr(api_module, "QueueClient", FakeQueueClient)
 
@@ -169,7 +169,7 @@ async def test_gql_items_stops_on_repeated_search_page(api_mock: API, monkeypatc
 
     assert len(reps) == 1
     assert len(calls) == 2
-    assert all(x[0] == "post" for x in calls)
+    assert all(x[0] == "get" for x in calls)
 
 
 async def test_gql_items_stops_on_repeated_cursor_for_other_timelines(api_mock: API, monkeypatch):
@@ -226,13 +226,13 @@ async def test_gql_items_continues_past_empty_search_pages(api_mock: API, monkey
 
         async def get(self, url, params=None):
             calls.append(("get", url, params))
-            raise AssertionError("SearchTimeline should use POST")
-
-        async def post(self, url, json=None):
-            calls.append(("post", url, json))
             if not pages:
                 raise AssertionError("unexpected extra pagination request")
             return pages.pop(0)
+
+        async def post(self, url, json=None):
+            calls.append(("post", url, json))
+            raise AssertionError("SearchTimeline should use GET like the x.com web client")
 
     monkeypatch.setattr(api_module, "QueueClient", FakeQueueClient)
 
@@ -245,16 +245,12 @@ async def test_gql_items_continues_past_empty_search_pages(api_mock: API, monkey
 
     assert len(reps) == 1
     assert len(calls) == 2
-    assert all(x[0] == "post" for x in calls)
+    assert all(x[0] == "get" for x in calls)
 
 
 @pytest.mark.parametrize(
     ("op", "variables"),
     [
-        (
-            api_module.OP_SearchTimeline,
-            {"rawQuery": "foo", "count": 20, "product": "Latest", "querySource": "typed_query"},
-        ),
         (
             api_module.OP_Followers,
             {"userId": "2244994945", "count": 20, "includePromotedContent": False},
@@ -382,8 +378,8 @@ def mock_search_pages(monkeypatch, pages):
         async def __aexit__(self, *args):
             pass
 
-        async def post(self, url, json):
-            calls.append(json)
+        async def get(self, url, params):
+            calls.append({key: json.loads(value) for key, value in params.items()})
             assert pages, "unexpected extra pagination request"
             return DummyResponse(pages.pop(0))
 
@@ -449,3 +445,44 @@ async def test_raw_search_keeps_page_based_limit(api_mock, monkeypatch):
     assert len(pages) == 1
     assert [tweet.id for tweet in api_module.parse_tweets(pages[0].json())] == [1, 2]
     assert len(calls) == 1
+
+
+async def test_search_sends_the_web_clients_variables_and_features(api_mock: API, monkeypatch):
+    """SearchTimeline as the x.com web client sent it on 2026-11-20 (fa0311/twitter-openapi#147): the same
+    variables in the same order, exactly its feature switches, no fieldToggles. A different feature set is a
+    fingerprint, and a set that does not match the operation can get a 404 (Scweet 5.8.1)."""
+    capture = json.loads(
+        (Path(__file__).parent / "browser_capture" / "search_timeline.json").read_text()
+    )
+    sent = []
+
+    class FakeQueueClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def get(self, url, params):
+            sent.append((url, params))
+            return DummyResponse(make_search_page(["tweet-1"], None))
+
+    monkeypatch.setattr(api_module, "QueueClient", FakeQueueClient)
+
+    await gather(api_mock.search_raw("$NVDA lang:en", limit=1))
+
+    url, params = sent[0]
+    assert url.endswith(capture["@path"].split("/graphql/", 1)[1])
+    assert list(params) == ["variables", "features"]
+    variables = json.loads(params["variables"])
+    assert list(variables) == list(capture["variables"])
+    assert variables == {
+        **capture["variables"],
+        "rawQuery": "$NVDA lang:en",
+        "product": "Latest",
+        "withGrokTranslatedBio": False,  # the web client sends true for Top and People only
+    }
+    assert json.loads(params["features"]) == capture["features"]

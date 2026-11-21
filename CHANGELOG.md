@@ -1,5 +1,75 @@
 # Changelog
 
+## v0.22.0 - 2026-11-21
+
+X stopped serving search to every account of a production pool on 2026-11-21
+(the first six on 2026-11-05). The accounts stayed limited, and the 5-minute
+hold sent each of them about 400 more refused searches in two hours. These
+changes make each account look like one browser on one connection and stop
+asking X for search once it refused an account.
+
+### Changed
+
+- An account's own `proxy` now wins over the API `proxy` and `TWS_PROXY`, for
+  API requests and for the x-client-transaction-id page fetch. Before, a
+  shared `TWS_PROXY` overrode every account, so all accounts left through one
+  gateway. Accounts without their own proxy still use the API proxy, then
+  `TWS_PROXY`.
+- SearchTimeline is sent as GET, like the x.com web client, instead of POST.
+  Upstream declined the POST route as easier to detect
+  ([#368](https://github.com/vladkens/twscrape/pull/368)).
+- A refused search quarantines the account for search: HTTP 200 with
+  `(-1) Internal server error` and no data, or HTTP 404 after three fresh
+  x-client-transaction-ids. The account gets a SearchTimeline lock for
+  `TWS_SEARCH_REFUSAL_LOCK_SECONDS` (default 6 hours) instead of 5 minutes and
+  is not released when every account fails. The request moves to a free
+  account; without one, or after three refused accounts, it raises
+  `SearchRefusedError` (a `ServiceUnavailableError`). Each refused account is
+  asked once per request. Other transient errors keep their behavior.
+- `get_for_queue_or_wait` gives up at once when the earliest account comes back
+  later than the wait could last and later than an in-use account's 15-minute
+  placeholder, for example when every account is quarantined from search.
+  Before, each request waited out its full timeout.
+
+- The x-client-transaction-id animation key now matches Chromium: colour
+  channels are clamped to 0..255, the easing is solved like Chromium's
+  `gfx::CubicBezier`, matrix entries are rounded from their printed form, and
+  the frame time is rounded to tens as X's script does. Before, 441 of 1000
+  browser-recorded keys diverged (at least 4.9% of random keys printed a channel
+  above 255), and X answers such ids with an empty 404. Ported from
+  [Lqm1/x-client-transaction-id#26](https://github.com/Lqm1/x-client-transaction-id/pull/26);
+  `tests/browser_capture/xtid` holds the Apache-2.0 vectors of
+  [anatolykoptev/go-twitter](https://github.com/anatolykoptev/go-twitter).
+- The signing indices are also found in X's hashed x-web build: static imports
+  are followed from the page scripts (2 levels, 32 chunks) to the chunk loaded
+  with `import(x).then(m => m.default())`. A chunk needs at least two
+  `(a[N], 16)` indices to count, so an unrelated chunk with one match is not
+  taken. Adapted from [vladkens/twscrape#380](https://github.com/vladkens/twscrape/pull/380).
+- Before a search 404 starts the quarantine, one signed control read
+  (UserByScreenName) checks that the account still reads. If it fails too, the
+  account cools down for 30 minutes (past the 15-minute wait horizon) and the
+  request fails as before. X does not check the transaction id on this read
+  (measured 2026-11-21), so it does not detect a broken signature.
+- SearchTimeline sends the web client's variables in its order
+  (`withGrokTranslatedBio` true for Top and People only,
+  `withQuickPromoteEligibilityTweetFields`), exactly the feature switches the
+  web client sent on 2026-11-20 (fa0311/twitter-openapi#147) and no
+  `fieldToggles`. Other operations keep `GQL_FEATURES`.
+
+### Added
+
+- Optional browser fingerprint: `API(impersonate="chrome")` or
+  `TWS_IMPERSONATE=chrome` sends requests through curl-cffi with that browser's
+  TLS and HTTP/2 fingerprint while twscrape keeps its httpx client. The browser
+  profile sets the user agent and client hints; the stored account user agent
+  is not sent. API calls (`/i/api/`, `/graphql/`, `/1.1/`) carry the web
+  client's fetch headers (`accept: */*`, `sec-fetch-mode: cors`,
+  `sec-fetch-dest: empty`, `sec-fetch-site`, `priority: u=1, i`, the search page
+  as referer for SearchTimeline, `origin` on POST) instead of the profile's
+  page-load headers. Selectively adapts the idea of upstream
+  [#363](https://github.com/vladkens/twscrape/pull/363). New dependency:
+  `curl-cffi>=0.16.3`.
+
 ## v0.21.3 - 2026-11-09
 
 ### Fixed

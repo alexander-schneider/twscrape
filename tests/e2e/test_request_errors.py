@@ -8,7 +8,7 @@ import pytest
 import twscrape.cli as cli
 from tests.http_replay import error_body, page, tweet
 from twscrape import AbortReqError, XClIdParseError
-from twscrape.queue_client import XClIdGenStore
+from twscrape.queue_client import SearchRefusedError, XClIdGenStore
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
@@ -67,16 +67,22 @@ async def test_page_abort_reaches_reader_after_yielded_results(
         operation=operation,
     )
     enqueue_abort(wire, operation, status)
+    # A 404 on search after fresh signing, with a working signed control read, is X refusing search for the
+    # account (vladkens/twscrape#367).
+    refused = operation == "SearchTimeline" and status == 404
+    if refused:
+        wire.enqueue({"data": {"user": {}}}, operation="UserByScreenName")
 
     received = []
-    with pytest.raises(AbortReqError):
+    with pytest.raises(SearchRefusedError if refused else AbortReqError):
         async for item in getattr(api, method)(arg):
             received.append(item.status_code if raw else item.id)
 
     assert received == ([200] if raw else [901])
     assert wire.requests[1]["payload"]["variables"]["cursor"] == "next"
     saved = await api.pool.get("offline-0")
-    assert saved is not None and saved.active and saved.locks == {}
+    assert saved is not None and saved.active
+    assert set(saved.locks) == ({"SearchTimeline"} if refused else set())
     assert [item["total_req"] for item in await api.pool.accounts_info()] == [1]
 
 

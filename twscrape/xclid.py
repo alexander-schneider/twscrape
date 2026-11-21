@@ -1,5 +1,6 @@
 import asyncio
 import base64
+from decimal import ROUND_FLOOR, Decimal
 import hashlib
 import json
 import math
@@ -30,9 +31,13 @@ def _make_client(
     proxy: str | None = None,
     user_agent: str | None = None,
     cookies: dict[str, str] | None = None,
+    impersonate: str | None = None,
 ) -> httpx.AsyncClient:
+    from .account import make_transport, resolve_impersonate
+
     headers = {"user-agent": user_agent or UserAgent().chrome}
-    client = httpx.AsyncClient(headers=headers, follow_redirects=True, proxy=proxy)
+    transport = make_transport(proxy, resolve_impersonate(impersonate))
+    client = httpx.AsyncClient(headers=headers, follow_redirects=True, transport=transport)
     if cookies:
         for key, value in cookies.items():
             client.cookies.jar.set_cookie(_make_secure_x_cookie(key, value))
@@ -212,42 +217,122 @@ INDICES_REGEX = re.compile(r"(\(\w{1}\[(\d{1,2})\],\s*16\))+", flags=(re.VERBOSE
 INDICES_FILE_RE = re.compile(r"(?:\.{0,2}/)?[\w./-]*?\b(?:ondemand\.s|sign\.o)[\w.-]*\.js")
 
 
-class Cubic:  # cubic_curve.py
+class Cubic:
+    """Cubic Bezier easing evaluated like Chromium's gfx::CubicBezier (ui/gfx/geometry/cubic_bezier.cc).
+
+    X runs the easing as a CSS animation in the browser, so the value to match is Chromium's: a spline-sampled
+    first guess, up to 4 Newton steps, then bisection to 1e-7. Plain bisection to 1e-5 moves a printed digit of
+    the animation key for some curves (Lqm1/x-client-transaction-id#26).
+    """
+
+    EPSILON = 1e-7
+    NEWTON_ITERATIONS = 4
+    SPLINE_SAMPLES = 11
+    SPLINE_STEP = 1.0 / (SPLINE_SAMPLES - 1)
+
     def __init__(self, curves: list[float]):
-        self.curves = curves
+        x1, y1, x2, y2 = curves
+        self.cx = 3.0 * x1
+        self.bx = 3.0 * (x2 - x1) - self.cx
+        self.ax = 1.0 - self.cx - self.bx
+        self.cy = 3.0 * y1
+        self.by = 3.0 * (y2 - y1) - self.cy
+        self.ay = 1.0 - self.cy - self.by
+
+        if x1 > 0:
+            self.start_gradient = y1 / x1
+        elif y1 == 0 and x2 > 0:
+            self.start_gradient = y2 / x2
+        elif y1 == 0 and y2 == 0:
+            self.start_gradient = 1.0
+        else:
+            self.start_gradient = 0.0
+
+        if x2 < 1:
+            self.end_gradient = (y2 - 1) / (x2 - 1)
+        elif y2 == 1 and x1 < 1:
+            self.end_gradient = (y1 - 1) / (x1 - 1)
+        elif y2 == 1 and y1 == 1:
+            self.end_gradient = 1.0
+        else:
+            self.end_gradient = 0.0
+
+        self.spline_samples = [self._x(i * self.SPLINE_STEP) for i in range(self.SPLINE_SAMPLES)]
 
     def get_value(self, time: float) -> float:
-        start_gradient = end_gradient = start = mid = 0.0
-        end = 1.0
+        if time < 0:
+            return self.start_gradient * time
+        if time > 1:
+            return 1.0 + self.end_gradient * (time - 1.0)
+        return self._y(self._solve_x(time))
 
-        if time <= 0.0:
-            if self.curves[0] > 0.0:
-                start_gradient = self.curves[1] / self.curves[0]
-            elif self.curves[1] == 0.0 and self.curves[2] > 0.0:
-                start_gradient = self.curves[3] / self.curves[2]
-            return start_gradient * time
+    def _x(self, t: float) -> float:
+        return ((self.ax * t + self.bx) * t + self.cx) * t
 
-        if time >= 1.0:
-            if self.curves[2] < 1.0:
-                end_gradient = (self.curves[3] - 1.0) / (self.curves[2] - 1.0)
-            elif self.curves[2] == 1.0 and self.curves[0] < 1.0:
-                end_gradient = (self.curves[1] - 1.0) / (self.curves[0] - 1.0)
-            return 1.0 + end_gradient * (time - 1.0)
+    def _y(self, t: float) -> float:
+        return ((self.ay * t + self.by) * t + self.cy) * t
 
-        while start < end:
-            mid = (start + end) / 2
-            x_est = self.calculate(self.curves[0], self.curves[2], mid)
-            if abs(time - x_est) < 0.00001:
-                return self.calculate(self.curves[1], self.curves[3], mid)
-            if x_est < time:
-                start = mid
+    def _dx(self, t: float) -> float:
+        return (3.0 * self.ax * t + 2.0 * self.bx) * t + self.cx
+
+    def _solve_x(self, x: float) -> float:
+        t0, t1, t2 = 0.0, 1.0, x
+        for i in range(1, self.SPLINE_SAMPLES):
+            if x <= self.spline_samples[i]:
+                t1 = self.SPLINE_STEP * i
+                t0 = t1 - self.SPLINE_STEP
+                t2 = t0 + (t1 - t0) * (x - self.spline_samples[i - 1]) / (
+                    self.spline_samples[i] - self.spline_samples[i - 1]
+                )
+                break
+
+        # Chromium also tests the residual of the point before the last Newton step.
+        x2 = 0.0
+        for _ in range(self.NEWTON_ITERATIONS):
+            x2 = self._x(t2) - x
+            if abs(x2) < self.EPSILON:
+                return t2
+            d2 = self._dx(t2)
+            if abs(d2) < self.EPSILON:
+                break
+            t2 -= x2 / d2
+        if abs(x2) < self.EPSILON:
+            return t2
+
+        while t0 < t1:
+            x2 = self._x(t2)
+            if abs(x2 - x) < self.EPSILON:
+                return t2
+            if x > x2:
+                t0 = t2
             else:
-                end = mid
-        return self.calculate(self.curves[1], self.curves[3], mid)
+                t1 = t2
+            t2 = (t1 + t0) * 0.5
+        return t2
 
-    @staticmethod
-    def calculate(a: float, b: float, m: float) -> float:
-        return 3.0 * a * (1 - m) * (1 - m) * m + 3.0 * b * (1 - m) * m * m + m * m * m
+
+def js_round(value: float) -> int:
+    """JavaScript's Math.round: halves round up, unlike Python's round()."""
+    return math.floor(value + 0.5)
+
+
+def js_to_fixed(value: float, digits: int) -> float:
+    """Number(value.toFixed(digits)): from the exact binary value, a tie goes to the larger number."""
+    scale = Decimal(10) ** digits
+    scaled = Decimal(value) * scale
+    lower = scaled.to_integral_value(rounding=ROUND_FLOOR)
+    n = lower + 1 if scaled - lower >= Decimal("0.5") else lower
+    return float(n / scale)
+
+
+def matrix_numbers(value: float) -> list[float]:
+    """The numbers X's script reads back from a printed computed-matrix entry.
+
+    Chromium prints six significant digits (C's %.6g, scientific below 1e-4) and the script splits the text on
+    /[\\d.-]+/g, so "5.68575e-05" gives two numbers: 5.68575 and -5.
+    """
+    text = "0" if value == 0 else format(value, ".6g")
+    return [float(x) for x in re.findall(r"[\d.-]+", text)]
 
 
 def interpolate(from_list: list[float], to_list: list[float], f: float):
@@ -263,7 +348,7 @@ def get_rotation_matrix(rotation: float):
 
 def solve(value: float, min_val: float, max_val: float, rounding: bool):
     result = value * (max_val - min_val) / 255 + min_val
-    return math.floor(result) if rounding else round(result, 2)
+    return math.floor(result) if rounding else js_round(result * 100) / 100
 
 
 def float_to_hex(x):
@@ -302,36 +387,35 @@ def float_to_hex(x):
 
 
 def cacl_anim_key(frames: list[float], target_time: float) -> str:
-    from_color = [*frames[:3], 1]
-    to_color = [*frames[3:6], 1]
-    from_rotation = [0.0]
-    to_rotation = [solve(frames[6], 60.0, 360.0, True)]
-
-    frames = frames[7:]
-    curves = [solve(x, -1.0 if i % 2 else 0.0, 1.0, False) for i, x in enumerate(frames)]
+    """Colour and rotation matrix of X's loading animation at `target_time`, printed the way X's script reads
+    them from the browser (Lqm1/x-client-transaction-id#26, checked against Chromium-recorded vectors)."""
+    from_color, to_color = frames[:3], frames[3:6]
+    to_rotation = solve(frames[6], 60.0, 360.0, True)
+    curves = [solve(x, -1.0 if i % 2 else 0.0, 1.0, False) for i, x in enumerate(frames[7:])]
     val = Cubic(curves).get_value(target_time)
 
-    color = interpolate(from_color, to_color, val)
-    color = [value if value > 0 else 0 for value in color]
-    rotation = interpolate(from_rotation, to_rotation, val)
+    # The eased value can overshoot [0, 1]; the browser clamps colour channels to 0..255.
+    color = [
+        format(js_round(max(0.0, min(255.0, channel))), "x")
+        for channel in interpolate(from_color, to_color, val)
+    ]
+    rotation = interpolate([0.0], [to_rotation], val)[0]
+    matrix = []
+    for value in get_rotation_matrix(rotation):
+        for number in matrix_numbers(value):
+            hex_value = float_to_hex(abs(js_to_fixed(number, 2))).lower()
+            matrix.append(f"0{hex_value}" if hex_value.startswith(".") else hex_value or "0")
 
-    matrix = get_rotation_matrix(rotation[0])
-    str_arr = [format(round(value), "x") for value in color[:-1]]
-    for value in matrix:
-        rounded = round(value, 2)
-        if rounded < 0:
-            rounded = -rounded
-        hex_value = float_to_hex(rounded)
-        str_arr.append(
-            f"0{hex_value}".lower()
-            if hex_value.startswith(".")
-            else hex_value
-            if hex_value
-            else "0"
-        )
+    return re.sub(r"[.-]", "", "".join([*color, *matrix, "0", "0"]))
 
-    str_arr.extend(["0", "0"])
-    return re.sub(r"[.-]", "", "".join(str_arr))
+
+def animation_key(vk_bytes: list[int], anim_idx: list[int], frame_rows: list[list[float]]) -> str:
+    """The animation key for a verification key: the row and time its key bytes select."""
+    frame_time = 1
+    for x in anim_idx[1:]:
+        frame_time *= vk_bytes[x] % 16
+    frame_row = frame_rows[vk_bytes[anim_idx[0]] % 16]
+    return cacl_anim_key(frame_row, js_round(frame_time / 10) * 10 / 4096)
 
 
 def parse_vk_bytes(soup: bs4.BeautifulSoup) -> list[int]:
@@ -343,6 +427,23 @@ def parse_vk_bytes(soup: bs4.BeautifulSoup) -> list[int]:
     return list(base64.b64decode(bytes(el, "utf-8")))
 
 
+# Hashed x-web builds (e.g. `assets/Cm5_4wZ7.js`) have no named reference: the signing chunk is a lazily loaded
+# module whose default export is called, a few static imports below the page entry (vladkens/twscrape#379, #380).
+STATIC_IMPORT_RE = re.compile(r"""\b(?:from|import)\s*(["'`])([\w./-]+\.js)\1""")
+DEFAULT_IMPORT_RE = re.compile(
+    r"""\bimport\(\s*(["'`])([\w./-]+\.js)\1\s*\)\.then\(\s*\(?(\w+)\)?\s*=>\s*\3\.default\(\)"""
+)
+MAX_IMPORT_DEPTH = 2  # static import hops followed from the page scripts
+MAX_IMPORTED_ASSETS = 32  # chunks fetched beyond the page scripts
+# The signing chunk carries several `(a[N], 16)` indices; an unrelated large chunk can match once.
+MIN_SIGNING_INDICES = 2
+
+
+def _signing_indices(script_text: str) -> list[int] | None:
+    items = [int(x.group(2)) for x in INDICES_REGEX.finditer(script_text)]
+    return items if len(items) >= MIN_SIGNING_INDICES else None
+
+
 async def parse_anim_idx(text: str, clt: httpx.AsyncClient | None = None) -> list[int]:
     scripts = list(get_scripts_list(text))
     preferred_scripts = [x for x in scripts if INDICES_FILE_RE.search(x)]
@@ -352,25 +453,62 @@ async def parse_anim_idx(text: str, clt: httpx.AsyncClient | None = None) -> lis
         raise XClIdParseError("Couldn't get XClientTxId scripts")
 
     last_error: Exception | None = None
-    for script_url in scripts:
+    seen, level, budget = set(scripts), scripts, MAX_IMPORTED_ASSETS
+
+    async def fetch_indices(url: str) -> list[int] | None:
+        nonlocal last_error
         try:
-            script_text = await get_tw_page_text(script_url, clt=clt)
-            items = [int(x.group(2)) for x in INDICES_REGEX.finditer(script_text)]
+            return _signing_indices(await get_tw_page_text(url, clt=clt))
+        except Exception as e:
+            last_error = e
+            return None
+
+    for _depth in range(MAX_IMPORT_DEPTH + 1):
+        static_imports: list[str] = []
+        default_imports: list[str] = []
+        for script_url in level:
+            try:
+                script_text = await get_tw_page_text(script_url, clt=clt)
+            except Exception as e:
+                last_error = e
+                continue
+
+            items = _signing_indices(script_text)
             if items:
                 return items
 
-            indices_match = INDICES_FILE_RE.search(script_text)
-            if indices_match:
-                indices_url = urljoin(script_url, indices_match.group(0))
-                if not _is_allowed_script_url(indices_url):
-                    continue
-                indices_text = await get_tw_page_text(indices_url, clt=clt)
-                items = [int(x.group(2)) for x in INDICES_REGEX.finditer(indices_text)]
-                if items:
-                    return items
-        except Exception as e:
-            last_error = e
-            continue
+            named = INDICES_FILE_RE.search(script_text)
+            if named:
+                indices_url = urljoin(script_url, named.group(0))
+                if _is_allowed_script_url(indices_url):
+                    items = await fetch_indices(indices_url)
+                    if items:
+                        return items
+
+            static_imports += [
+                urljoin(script_url, m.group(2)) for m in STATIC_IMPORT_RE.finditer(script_text)
+            ]
+            default_imports += [
+                urljoin(script_url, m.group(2)) for m in DEFAULT_IMPORT_RE.finditer(script_text)
+            ]
+
+        for url in dict.fromkeys(default_imports):
+            if url in seen or not _is_allowed_script_url(url) or budget <= 0:
+                continue
+            seen.add(url)
+            budget -= 1
+            items = await fetch_indices(url)
+            if items:
+                return items
+
+        level = [
+            u for u in dict.fromkeys(static_imports) if u not in seen and _is_allowed_script_url(u)
+        ]
+        level = level[: max(0, budget)]
+        seen.update(level)
+        budget -= len(level)
+        if not level:
+            break
 
     raise XClIdParseError("Couldn't get XClientTxId indices") from last_error
 
@@ -395,15 +533,7 @@ async def load_keys(
     vk_bytes = parse_vk_bytes(soup)
     anim_arr = parse_anim_arr(soup, vk_bytes)
 
-    frame_time = 1
-    for x in anim_idx[1:]:
-        frame_time *= vk_bytes[x] % 16
-
-    frame_idx = vk_bytes[anim_idx[0]] % 16
-    frame_row = anim_arr[frame_idx]
-    frame_dur = float(frame_time) / 4096
-
-    anim_key = cacl_anim_key(frame_row, frame_dur)
+    anim_key = animation_key(vk_bytes, anim_idx, anim_arr)
     return vk_bytes, anim_key
 
 
@@ -414,9 +544,12 @@ class XClIdGen:
         proxy: str | None = None,
         user_agent: str | None = None,
         cookies: dict[str, str] | None = None,
+        impersonate: str | None = None,
     ) -> "XClIdGen":
         owns_client = clt is None
-        clt = clt or _make_client(proxy=proxy, user_agent=user_agent, cookies=cookies)
+        clt = clt or _make_client(
+            proxy=proxy, user_agent=user_agent, cookies=cookies, impersonate=impersonate
+        )
         last_error: Exception | None = None
 
         try:

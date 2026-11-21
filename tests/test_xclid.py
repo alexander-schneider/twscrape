@@ -217,7 +217,7 @@ async def test_parse_anim_idx_falls_back_to_main_bundle_when_ondemand_missing(mo
     """
     bundles = {
         "https://abs.twimg.com/responsive-web/client-web/vendor.f1dc7e4a.js": "window.vendor = true",
-        "https://abs.twimg.com/responsive-web/client-web/main.29dcc91a.js": "function tid(){return (h[7],16)}",
+        "https://abs.twimg.com/responsive-web/client-web/main.29dcc91a.js": "function tid(){return (h[7],16);(h[2],16)}",
     }
 
     async def fake_get_tw_page_text(url: str, clt=None):
@@ -225,7 +225,7 @@ async def test_parse_anim_idx_falls_back_to_main_bundle_when_ondemand_missing(mo
 
     monkeypatch.setattr("twscrape.xclid.get_tw_page_text", fake_get_tw_page_text)
 
-    assert await parse_anim_idx(html) == [7]
+    assert await parse_anim_idx(html) == [7, 2]
 
 
 @pytest.mark.asyncio
@@ -281,11 +281,11 @@ async def test_parse_anim_idx_skips_failing_bundle_fetches(monkeypatch):
     async def fake_get_tw_page_text(url: str, clt=None):
         if "ondemand.s" in url:
             raise httpx.HTTPStatusError("not found", request=request, response=response)
-        return "function tid(){return (h[7],16)}"
+        return "function tid(){return (h[7],16);(h[2],16)}"
 
     monkeypatch.setattr("twscrape.xclid.get_tw_page_text", fake_get_tw_page_text)
 
-    assert await parse_anim_idx(html) == [7]
+    assert await parse_anim_idx(html) == [7, 2]
 
 
 @pytest.mark.asyncio
@@ -366,11 +366,11 @@ async def test_parse_anim_idx_skips_untrusted_script_hosts(monkeypatch):
 
     async def fake_get_tw_page_text(url: str, clt=None):
         calls.append(url)
-        return "(a[7], 16)"
+        return "(a[7], 16);(a[2], 16)"
 
     monkeypatch.setattr("twscrape.xclid.get_tw_page_text", fake_get_tw_page_text)
 
-    assert await parse_anim_idx(html) == [7]
+    assert await parse_anim_idx(html) == [7, 2]
     assert calls == ["https://abs.twimg.com/responsive-web/client-web/main.12345a.js"]
 
 
@@ -400,6 +400,7 @@ async def test_xclid_create_passes_browser_client_metadata(monkeypatch):
         proxy="http://proxy.local",
         user_agent="ua",
         cookies={"auth_token": "token"},
+        impersonate="chrome",
     )
 
     assert calls == [
@@ -407,6 +408,7 @@ async def test_xclid_create_passes_browser_client_metadata(monkeypatch):
             "proxy": "http://proxy.local",
             "user_agent": "ua",
             "cookies": {"auth_token": "token"},
+            "impersonate": "chrome",
         }
     ]
 
