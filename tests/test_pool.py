@@ -415,3 +415,25 @@ async def test_get_for_queue_or_wait_still_waits_for_an_account_in_use(
 
     account = await pool.get_for_queue_or_wait("SearchTimeline")
     assert account is not None and account.username == "user1"
+
+
+async def test_get_for_queue_or_wait_takes_an_account_freed_during_the_check(
+    pool_mock: AccountsPool, monkeypatch
+):
+    """Race: the only other account is released between the first look and the lock check, so the check sees only
+    the quarantine. The account that came back is used instead of giving up."""
+    pool = AccountsPool(pool_mock._db_file, wait_timeout=900, raise_when_no_account=True)
+    for name in ("user1", "user2"):
+        await pool.add_account(name, "p", "e", "ep", cookies="auth_token=t; ct0=c")
+    await pool.lock_until("user1", "SearchTimeline", utc.ts() + 6 * 3600)
+    assert (await pool.get_for_queue("SearchTimeline")).username == "user2"
+    seconds_until_available = pool.seconds_until_available
+
+    async def released_meanwhile(queue):
+        await pool.unlock("user2", queue)
+        return await seconds_until_available(queue)
+
+    monkeypatch.setattr(pool, "seconds_until_available", released_meanwhile)
+
+    account = await pool.get_for_queue_or_wait("SearchTimeline")
+    assert account is not None and account.username == "user2"

@@ -368,9 +368,14 @@ class AccountsPool:
             if deadline is not None and not timed_out:
                 wait_s = await self.seconds_until_available(queue)
                 # Every account is held for longer than the wait could last, e.g. quarantined from search.
-                timed_out = wait_s is not None and wait_s > max(
+                if wait_s is not None and wait_s > max(
                     deadline - loop.time(), IN_USE_LOCK_SECONDS + 60
-                )
+                ):
+                    # An account in use may have come back since the first look; its lock is gone then.
+                    account = await self.get_for_queue(queue)
+                    if account is not None:
+                        return account
+                    timed_out = True
             give_up = no_active or self._wait_timeout is None or timed_out
 
             if give_up:
