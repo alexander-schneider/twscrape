@@ -445,3 +445,44 @@ async def test_raw_search_keeps_page_based_limit(api_mock, monkeypatch):
     assert len(pages) == 1
     assert [tweet.id for tweet in api_module.parse_tweets(pages[0].json())] == [1, 2]
     assert len(calls) == 1
+
+
+async def test_search_sends_the_web_clients_variables_and_features(api_mock: API, monkeypatch):
+    """SearchTimeline as the x.com web client sent it on 2026-11-20 (fa0311/twitter-openapi#147): the same
+    variables in the same order, exactly its feature switches, no fieldToggles. A different feature set is a
+    fingerprint, and a set that does not match the operation can get a 404 (Scweet 5.8.1)."""
+    capture = json.loads(
+        (Path(__file__).parent / "data" / "search_timeline_browser_capture.json").read_text()
+    )
+    sent = []
+
+    class FakeQueueClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def get(self, url, params):
+            sent.append((url, params))
+            return DummyResponse(make_search_page(["tweet-1"], None))
+
+    monkeypatch.setattr(api_module, "QueueClient", FakeQueueClient)
+
+    await gather(api_mock.search_raw("$NVDA lang:en", limit=1))
+
+    url, params = sent[0]
+    assert url.endswith(capture["@path"].split("/graphql/", 1)[1])
+    assert list(params) == ["variables", "features"]
+    variables = json.loads(params["variables"])
+    assert list(variables) == list(capture["variables"])
+    assert variables == {
+        **capture["variables"],
+        "rawQuery": "$NVDA lang:en",
+        "product": "Latest",
+        "withGrokTranslatedBio": False,  # the web client sends true for Top and People only
+    }
+    assert json.loads(params["features"]) == capture["features"]

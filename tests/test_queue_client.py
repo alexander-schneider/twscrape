@@ -1,3 +1,4 @@
+import re
 from collections import OrderedDict
 from contextlib import aclosing
 
@@ -22,6 +23,7 @@ from twscrape.xclid import XClIdAccountError, XClIdParseError
 
 DB_FILE = "/tmp/twscrape_test_queue_client.db"
 URL = "https://example.com/api"
+CONTROL_URL = re.compile(r"https://x\.com/i/api/graphql/[^/]+/UserByScreenName\?.*")
 CF = tuple[AccountsPool, QueueClient]
 
 
@@ -746,23 +748,45 @@ async def test_search_refused_for_every_account_stops_without_retrying_them(
 async def test_search_404_after_fresh_signing_is_a_refusal(
     httpx_mock: HTTPXMock, client_fixture: CF, monkeypatch
 ):
-    """A limited account gets HTTP 404 on GET SearchTimeline even with a fresh x-client-transaction-id; it is
-    quarantined like a refused search instead of failing the request (vladkens/twscrape#367, #368)."""
+    """A limited account gets HTTP 404 on GET SearchTimeline even with a fresh x-client-transaction-id while a
+    signed control read still works; it is quarantined like a refused search instead of failing the request
+    (vladkens/twscrape#367, #368)."""
     pool, client = client_fixture
     monkeypatch.setattr("twscrape.queue_client.asyncio.sleep", _mock_sleep)
     await client.__aenter__()
 
     for _ in range(3):
         httpx_mock.add_response(url=URL, status_code=404, text="")
+    httpx_mock.add_response(url=CONTROL_URL, json={"data": {"user": {}}}, status_code=200)
     httpx_mock.add_response(url=URL, json={"foo": "ok"}, status_code=200)
 
     rep = await client.get(URL)
 
     assert rep is not None and getattr(rep, "__username", None) == "user2"
-    assert [r.headers["x-csrf-token"] for r in httpx_mock.get_requests()] == ["csrf1"] * 3 + [
-        "csrf2"
-    ]
+    requests = httpx_mock.get_requests()
+    assert [r.headers["x-csrf-token"] for r in requests] == ["csrf1"] * 4 + ["csrf2"]
+    assert requests[3].url.path.endswith("/UserByScreenName") and requests[3].method == "GET"
     assert (await _search_lock_hours(pool))["user1"] == 6.0
+
+
+async def test_search_404_with_a_failing_control_read_is_not_a_search_limit(
+    httpx_mock: HTTPXMock, client_fixture: CF, monkeypatch
+):
+    """A broken signature or an account suspended everywhere also gets empty 404s. When the signed control read
+    fails too, the account only cools down briefly; no 6-hour search quarantine for a signing bug."""
+    pool, client = client_fixture
+    monkeypatch.setattr("twscrape.queue_client.asyncio.sleep", _mock_sleep)
+    await client.__aenter__()
+
+    for _ in range(3):
+        httpx_mock.add_response(url=URL, status_code=404, text="")
+    httpx_mock.add_response(url=CONTROL_URL, status_code=404, text="")
+
+    with pytest.raises(AbortReqError):
+        await client.get(URL)
+
+    assert [r.headers["x-csrf-token"] for r in httpx_mock.get_requests()] == ["csrf1"] * 4
+    assert (await _search_lock_hours(pool))["user1"] == 0.2
 
 
 async def test_search_refusal_lock_is_configurable(

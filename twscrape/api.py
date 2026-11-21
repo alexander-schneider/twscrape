@@ -67,6 +67,65 @@ GQL_FEATURES = {  # search values here (view source) https://x.com/
     "responsive_web_grok_show_grok_translated_post": True,
 }
 
+# SearchTimeline's feature switches exactly as the x.com web client sent them on 2026-11-20
+# (fa0311/twitter-openapi#147). Search uses this set alone, not merged into GQL_FEATURES.
+SEARCH_TIMELINE_FEATURES = {
+    "rweb_video_screen_enabled": False,
+    "rweb_cashtags_enabled": True,
+    "profile_label_improvements_pcf_label_in_post_enabled": True,
+    "responsive_web_profile_redirect_enabled": True,
+    "rweb_tipjar_consumption_enabled": False,
+    "verified_phone_label_enabled": False,
+    "creator_subscriptions_tweet_preview_api_enabled": True,
+    "responsive_web_graphql_timeline_navigation_enabled": True,
+    "premium_content_api_read_enabled": False,
+    "communities_web_enable_tweet_community_results_fetch": True,
+    "c9s_tweet_anatomy_moderator_badge_enabled": True,
+    "responsive_web_grok_analyze_button_fetch_trends_enabled": False,
+    "responsive_web_grok_analyze_post_followups_enabled": True,
+    "rweb_cashtags_composer_attachment_enabled": True,
+    "responsive_web_jetfuel_frame": True,
+    "rweb_sports_post_context_enabled": True,
+    "x_elections_post_context_enabled": True,
+    "responsive_web_grok_share_attachment_enabled": True,
+    "responsive_web_grok_annotations_enabled": True,
+    "articles_preview_enabled": True,
+    "responsive_web_edit_tweet_api_enabled": True,
+    "rweb_conversational_replies_downvote_enabled": False,
+    "graphql_is_translatable_rweb_tweet_is_translatable_enabled": True,
+    "view_counts_everywhere_api_enabled": True,
+    "longform_notetweets_consumption_enabled": True,
+    "responsive_web_twitter_article_tweet_consumption_enabled": True,
+    "content_disclosure_indicator_enabled": True,
+    "content_disclosure_ai_generated_indicator_enabled": True,
+    "responsive_web_grok_show_grok_translated_post": True,
+    "responsive_web_grok_analysis_button_from_backend": True,
+    "post_ctas_fetch_enabled": True,
+    "freedom_of_speech_not_reach_fetch_enabled": True,
+    "standardized_nudges_misinfo": True,
+    "tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled": True,
+    "longform_notetweets_rich_text_read_enabled": True,
+    "longform_notetweets_inline_media_enabled": False,
+    "responsive_web_nested_quote_preview_enabled": True,
+    "responsive_web_grok_image_annotation_enabled": True,
+    "responsive_web_grok_imagine_annotation_enabled": True,
+    "responsive_web_made_on_x_label_enabled": False,
+    "responsive_web_grok_community_note_auto_translation_is_enabled": True,
+    "responsive_web_enhance_cards_enabled": False,
+}
+
+USER_BY_SCREEN_NAME_FEATURES = {
+    "highlights_tweets_tab_ui_enabled": True,
+    "hidden_profile_likes_enabled": True,
+    "creator_subscriptions_tweet_preview_api_enabled": True,
+    "hidden_profile_subscriptions_enabled": True,
+    "subscriptions_verification_info_verified_since_enabled": True,
+    "subscriptions_verification_info_is_identity_verified_enabled": False,
+    "responsive_web_twitter_article_notes_tab_enabled": False,
+    "subscriptions_feature_can_gift_premium": False,
+    "profile_label_improvements_pcf_label_in_post_enabled": False,
+}
+
 KV = dict | None
 TrendId = Literal["trending", "news", "sport", "entertainment"] | str
 
@@ -183,10 +242,18 @@ class API:
     # gql helpers
 
     async def _gql_items(
-        self, op: str, kv: dict, ft: dict | None = None, limit=-1, cursor_type="Bottom"
+        self,
+        op: str,
+        kv: dict,
+        ft: dict | None = None,
+        limit=-1,
+        cursor_type="Bottom",
+        features: dict | None = None,
     ):
+        """`features` replaces the shared GQL_FEATURES for operations that send their own exact set."""
         queue, cur, cnt, active = op.split("/")[-1], None, 0, True
-        kv, ft = {**kv}, {**GQL_FEATURES, **(ft or {})}
+        kv = {**kv}
+        ft = dict(features) if features is not None else {**GQL_FEATURES, **(ft or {})}
         seen_cursors: set[str] = set()
         seen_pages: set[tuple[str, ...]] = set()
         empty_pages = 0
@@ -198,7 +265,7 @@ class API:
                 params = {"variables": kv, "features": ft}
                 if cur is not None:
                     params["variables"]["cursor"] = cur
-                if queue in ("SearchTimeline", "ListLatestTweetsTimeline"):
+                if queue == "ListLatestTweetsTimeline":
                     params["fieldToggles"] = {"withArticleRichContentState": False}
                 if queue in ("UserMedia",):
                     params["fieldToggles"] = {"withArticlePlainText": False}
@@ -261,14 +328,24 @@ class API:
 
     async def search_raw(self, q: str, limit=-1, kv: KV = None):
         op = OP_SearchTimeline
+        extra = {"product": "Latest", **(kv or {})}
+        product = extra.pop("product")
+        # The web client's variable order; it sends withGrokTranslatedBio=true for Top and People only.
         kv = {
-            "rawQuery": q,
-            "count": 20,
-            "product": "Latest",
-            "querySource": "typed_query",
-            **(kv or {}),
+            "rawQuery": extra.pop("rawQuery", q),
+            "count": extra.pop("count", 20),
+            "querySource": extra.pop("querySource", "typed_query"),
+            "product": product,
+            "withGrokTranslatedBio": extra.pop(
+                "withGrokTranslatedBio", product in ("Top", "People")
+            ),
+            "withQuickPromoteEligibilityTweetFields": extra.pop(
+                "withQuickPromoteEligibilityTweetFields", False
+            ),
+            **extra,
         }
-        async with aclosing(self._gql_items(op, kv, limit=limit)) as gen:
+        gen_items = self._gql_items(op, kv, limit=limit, features=SEARCH_TIMELINE_FEATURES)
+        async with aclosing(gen_items) as gen:
             async for x in gen:
                 yield x
 
@@ -308,18 +385,7 @@ class API:
     async def user_by_login_raw(self, login: str, kv: KV = None):
         op = OP_UserByScreenName
         kv = {"screen_name": login, "withSafetyModeUserFields": True, **(kv or {})}
-        ft = {
-            "highlights_tweets_tab_ui_enabled": True,
-            "hidden_profile_likes_enabled": True,
-            "creator_subscriptions_tweet_preview_api_enabled": True,
-            "hidden_profile_subscriptions_enabled": True,
-            "subscriptions_verification_info_verified_since_enabled": True,
-            "subscriptions_verification_info_is_identity_verified_enabled": False,
-            "responsive_web_twitter_article_notes_tab_enabled": False,
-            "subscriptions_feature_can_gift_premium": False,
-            "profile_label_improvements_pcf_label_in_post_enabled": False,
-        }
-        return await self._gql_item(op, kv, ft)
+        return await self._gql_item(op, kv, USER_BY_SCREEN_NAME_FEATURES)
 
     async def user_by_login(self, login: str, kv: KV = None) -> User | None:
         rep = await self.user_by_login_raw(login, kv=kv)

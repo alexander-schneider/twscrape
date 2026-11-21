@@ -120,3 +120,34 @@ async def test_transaction_id_page_fetch_uses_the_same_fingerprint(server):
         await client.get(server)
     ua = _Recorder.seen[0]["headers"]["user-agent"]
     assert "Chrome/" in ua and "iPhone" not in ua
+
+
+async def test_api_calls_look_like_the_web_clients_fetch_not_a_page_load(server, monkeypatch):
+    monkeypatch.delenv("TWS_PROXY", raising=False)
+    variables = json.dumps({"rawQuery": "$NVDA lang:en", "product": "Latest"})
+    async with _account().make_client(impersonate="chrome") as client:
+        await client.get(
+            f"{server}/i/api/graphql/x/SearchTimeline", params={"variables": variables}
+        )
+        await client.post(f"{server}/i/api/graphql/x/Followers", json={"variables": {}})
+        await client.get(f"{server}/tesla")  # the page the transaction-id signer loads
+
+    search, post, page = (request["headers"] for request in _Recorder.seen)
+    for api in (search, post):
+        assert (
+            api["accept"],
+            api["sec-fetch-site"],
+            api["sec-fetch-mode"],
+            api["sec-fetch-dest"],
+        ) == (
+            "*/*",
+            "same-origin",
+            "cors",
+            "empty",
+        )
+        # curl sends `priority` only over HTTP/2, as Chrome does; this local server speaks HTTP/1.1.
+        assert "upgrade-insecure-requests" not in api and "sec-fetch-user" not in api
+    assert search["referer"] == "https://x.com/search?q=%24NVDA%20lang%3Aen&src=typed_query&f=live"
+    assert "origin" not in search
+    assert post["origin"] == "https://x.com" and post["referer"] == "https://x.com/"
+    assert (page["sec-fetch-mode"], page["sec-fetch-dest"]) == ("navigate", "document")

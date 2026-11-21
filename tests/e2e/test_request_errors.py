@@ -67,8 +67,11 @@ async def test_page_abort_reaches_reader_after_yielded_results(
         operation=operation,
     )
     enqueue_abort(wire, operation, status)
-    # A 404 on search after fresh signing is X refusing search for the account (vladkens/twscrape#367).
+    # A 404 on search after fresh signing, with a working signed control read, is X refusing search for the
+    # account (vladkens/twscrape#367).
     refused = operation == "SearchTimeline" and status == 404
+    if refused:
+        wire.enqueue({"data": {"user": {}}}, operation="UserByScreenName")
 
     received = []
     with pytest.raises(SearchRefusedError if refused else AbortReqError):

@@ -23,6 +23,8 @@ TRANSIENT_API_ERROR_RETRY_LIMIT = 3
 TRANSIENT_API_ERROR_COOLDOWN_SECONDS = 60 * 5
 UNKNOWN_API_ERROR_COOLDOWN_SECONDS = 60 * 15
 SEARCH_QUEUE = "SearchTimeline"
+# A public account read for the signed control request before a search quarantine.
+CONTROL_SCREEN_NAME = "X"
 DEFAULT_SEARCH_REFUSAL_LOCK_SECONDS = 6 * 60 * 60
 
 
@@ -331,6 +333,34 @@ class QueueClient:
         self.ctx = self._ctx_for(acc)
         return True
 
+    async def _signed_control_succeeds(self) -> bool:
+        """One signed GraphQL read that search-limited accounts still get (UserByScreenName).
+
+        An empty 404 on search also comes from a broken x-client-transaction-id or an account suspended
+        everywhere (vladkens/twscrape#368, #384); only a working control read makes the 404 a search limit.
+        """
+        from .api import GQL_FEATURES, GQL_URL, OP_UserByScreenName, USER_BY_SCREEN_NAME_FEATURES
+        from .utils import encode_params
+
+        ctx = self.ctx
+        if ctx is None:
+            return False
+        url = f"{GQL_URL}/{OP_UserByScreenName}"
+        params = {
+            "variables": {"screen_name": CONTROL_SCREEN_NAME, "withSafetyModeUserFields": True},
+            "features": {**GQL_FEATURES, **USER_BY_SCREEN_NAME_FEATURES},
+        }
+        try:
+            gen = await XClIdGenStore.get(ctx.acc, proxy=self.proxy, impersonate=self.impersonate)
+            hdr = {"x-client-transaction-id": gen.calc("GET", urlparse(url).path)}
+            rep = await ctx.clt.get(url, params=encode_params(params), headers=hdr)
+        except Exception as e:
+            logger.warning(
+                f"Signed control read failed for {ctx.acc.username}: {type(e).__name__}: {e}"
+            )
+            return False
+        return rep.status_code == 200
+
     @staticmethod
     def _is_search_refusal(err_msg: str) -> bool:
         return "(-1) Internal server error" in err_msg
@@ -543,6 +573,13 @@ class QueueClient:
                 return rep
             except NotFoundAfterSigningError as e:
                 if self.queue != SEARCH_QUEUE:
+                    raise
+                if not await self._signed_control_succeeds():
+                    logger.warning(
+                        f"Search 404 for {ctx.acc.username} and the signed control read failed too: not a "
+                        f"search limit. Cooling the account for {UNKNOWN_API_ERROR_COOLDOWN_SECONDS}s"
+                    )
+                    await self._close_ctx(utc.ts() + UNKNOWN_API_ERROR_COOLDOWN_SECONDS)
                     raise
                 refused += 1
                 if not await self._quarantine_refused_search("HTTP 404 after fresh signing") or (
