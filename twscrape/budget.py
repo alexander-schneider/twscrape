@@ -27,6 +27,9 @@ DEFAULT_WARMUP_START_FRACTION = 0.1
 _QUEUE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 # Reserved keys in an account's stats JSON (objects or strings, so Account.from_rs and the counters skip them).
 DAILY_STATS_KEY = "__daily__"  # {"SearchTimeline": {"day": "2026-11-22", "count": 12}}
+FIRST_USED_STATS_KEY = (
+    "__first_used__"  # ISO time of the account's first budgeted request; set once
+)
 # The pacing interval is stretched or shortened by a uniform factor, so the rhythm is not machine-regular.
 JITTER_LOW, JITTER_HIGH = 0.8, 1.2
 
@@ -103,6 +106,17 @@ class AccountBudget:
 
     def applies_to(self, queue: str) -> bool:
         return queue in self.pacing or queue in self.daily_caps
+
+    def fraction(self, first_used: datetime | None, now: datetime) -> float:
+        """The warm-up fraction: start + (1 - start) x min(1, age / days); 1.0 when warm-up is off.
+
+        Age is counted in days since the account's first budgeted request; an account without one is on day 0.
+        """
+        if self.warmup_days <= 0:
+            return 1.0
+        start = self.warmup_start_fraction
+        age = 0.0 if first_used is None else max(0.0, (now - first_used).total_seconds() / 86400)
+        return start + (1 - start) * min(1.0, age / self.warmup_days)
 
     def cap_for(self, queue: str, fraction: float = 1.0) -> int | None:
         """Requests per UTC day for `queue`, times the warm-up fraction (floor, at least 1); None when uncapped."""

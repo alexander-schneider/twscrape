@@ -9,7 +9,7 @@ from fake_useragent import UserAgent
 from httpx import HTTPStatusError
 
 from .account import Account
-from .budget import DAILY_STATS_KEY, AccountBudget, utc_day
+from .budget import DAILY_STATS_KEY, FIRST_USED_STATS_KEY, AccountBudget, utc_day
 from .db import execute, fetchall, fetchone
 from .logger import logger
 from .login import LoginConfig, login
@@ -335,6 +335,21 @@ class AccountsPool:
             {"username": username},
         )
         return int(rs[0]) if rs and rs[0] else 1
+
+    async def first_used(self, username: str) -> datetime:
+        """When the account sent its first budgeted request; stored once, on the first call (the warm-up clock)."""
+        path = f'$."{FIRST_USED_STATS_KEY}"'
+        qs = f"""
+        UPDATE accounts SET stats = json_set(stats, '{path}', :now)
+        WHERE username = :username AND json_extract(stats, '{path}') IS NULL
+        """
+        await execute(self._db_file, qs, {"username": username, "now": utc.now().isoformat()})
+        rs = await fetchone(
+            self._db_file,
+            f"SELECT json_extract(stats, '{path}') FROM accounts WHERE username = :username",
+            {"username": username},
+        )
+        return utc.from_iso(rs[0]) if rs and rs[0] else utc.now()
 
     async def count_request(self, username: str, queue: str, cap: int | None) -> int | None:
         """Counts one request of the account on `queue` for today (UTC) before it is sent; returns the new count.

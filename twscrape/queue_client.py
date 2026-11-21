@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 from collections.abc import Awaitable, Callable
+from datetime import datetime
 from typing import Any
 from urllib.parse import urlparse
 
@@ -206,6 +207,8 @@ class Ctx:
         self.pace_seconds: float | None = None
         # Unix seconds until which the account's daily cap on the queue holds it; None below the cap.
         self.cap_until: int | None = None
+        # The account's first budgeted request (warm-up clock), read once per context.
+        self.first_used: datetime | None = None
 
     async def retry(self, kind: str, limit: int) -> bool:
         self.failures[kind] += 1
@@ -321,7 +324,10 @@ class QueueClient:
         The daily count is stored before the request goes out (X counts requests, failed ones too). An account
         already at its cap sends nothing: DailyCapReached moves the request to another account.
         """
-        cap = self.budget.cap_for(self.queue)
+        if ctx.first_used is None:
+            ctx.first_used = await self.pool.first_used(ctx.acc.username)
+        fraction = self.budget.fraction(ctx.first_used, utc.now())
+        cap = self.budget.cap_for(self.queue, fraction)
         if cap is not None:
             count = await self.pool.count_request(ctx.acc.username, self.queue, cap)
             if count is None or count >= cap:
@@ -330,7 +336,7 @@ class QueueClient:
                 raise DailyCapReached(
                     f"{ctx.acc.username} used its daily cap of {cap} on {self.queue}"
                 )
-        ctx.pace_seconds = self.budget.pace_seconds(self.queue)
+        ctx.pace_seconds = self.budget.pace_seconds(self.queue, fraction)
 
     def _budget_floor(self, ctx: "Ctx") -> int:
         """The earliest the account may use this queue again under its budget (unix seconds), or 0."""
