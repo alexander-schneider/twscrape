@@ -526,3 +526,59 @@ async def test_the_cap_that_holds_an_account_includes_its_warm_up(tmp_path, monk
 
     with pytest.raises(BudgetExhaustedError, match="SearchTimeline=400"):
         await waiting_pool(pool, wait_timeout=900).get_for_queue_or_wait("SearchTimeline")
+
+
+# --- persistence --------------------------------------------------------------------------------------------
+
+
+async def test_budget_state_survives_save_and_a_reloaded_pool(
+    httpx_mock: HTTPXMock, tmp_path, monkeypatch
+):
+    """A login saves the loaded Account; every reserved __...__ stats key must survive it, and a new process
+    (a reloaded pool) continues the same count. The Account model and the request counters never see them."""
+    pool = await make_pool(
+        tmp_path, monkeypatch, accounts=1, TWS_ACCOUNT_DAILY_CAPS="SearchTimeline=3"
+    )
+    httpx_mock.add_response(url=URL, json=SEARCH_PAGE)
+    httpx_mock.add_response(url=URL, json=SEARCH_PAGE)
+    async with QueueClient(pool, "SearchTimeline") as client:
+        await client.get(URL)
+    await pool.record_refusal("user1", "SearchTimeline")
+    await set_stat(
+        pool, "user1", "__future_counter__", 7
+    )  # a reserved key that happens to be an int
+    before = await raw_stats(pool, "user1")
+
+    account = await pool.get("user1")
+    assert account.stats == {"SearchTimeline": 1}
+    account.stats["SearchTimeline"] = 5
+    await pool.save(account)
+
+    after = await raw_stats(pool, "user1")
+    for key in ("__daily__", "__first_used__", "__search_refusals__", "__future_counter__"):
+        assert after[key] == before[key], key
+    assert after["SearchTimeline"] == 5
+    assert {i["username"]: i["total_req"] for i in await pool.accounts_info()} == {"user1": 5}
+
+    reloaded = AccountsPool(pool._db_file)
+    async with QueueClient(reloaded, "SearchTimeline") as client:
+        await client.get(URL)
+    assert (await raw_stats(reloaded, "user1"))["__daily__"]["SearchTimeline"]["count"] == 2
+
+
+async def test_reset_locks_keeps_daily_counts_and_first_used(tmp_path, monkeypatch):
+    pool = await make_pool(tmp_path, monkeypatch, accounts=1)
+    await set_stat(pool, "user1", "__first_used__", "2026-11-01T00:00:00+00:00")
+    await set_stat(
+        pool, "user1", "__daily__", {"SearchTimeline": {"day": "2026-11-22", "count": 9}}
+    )
+    await pool.record_refusal("user1", "SearchTimeline")
+    await pool.lock_until("user1", "SearchTimeline", utc.ts() + 3600)
+
+    await pool.reset_locks()
+
+    stats = await raw_stats(pool, "user1")
+    assert stats["__first_used__"] == "2026-11-01T00:00:00+00:00"
+    assert stats["__daily__"] == {"SearchTimeline": {"day": "2026-11-22", "count": 9}}
+    assert "__search_refusals__" not in stats
+    assert (await pool.get("user1")).locks == {}
