@@ -481,14 +481,15 @@ class AccountsPool:
             if give_up:
                 if raise_no_account:
                     capped = await self.accounts_held_by_cap(queue)
-                    active = await self._active_usernames()
-                    # Only a pool held entirely by its caps is out of capacity; one account held by anything
-                    # else (refusal, cooldown, rate limit) may be an outage the caller must see as such.
-                    if capped and set(capped) >= active:
+                    # One active account held by its cap means X still lets it search: the pool is out of its
+                    # own capacity, even if X refuses the others. Only a pool without a capped account is an
+                    # outage the caller sees as NoAccountError (api.adanos.org#3565: no paid fallback for caps).
+                    if capped:
                         cap = self.budget.daily_caps[queue]
+                        active = await self._active_usernames()
                         raise BudgetExhaustedError(
-                            f"No account available for queue {queue}: {len(capped)} account(s) used "
-                            f"their daily cap ({queue}={cap} per UTC day, less during warm-up)"
+                            f"No account available for queue {queue}: {len(capped)} of {len(active)} active "
+                            f"account(s) used their daily cap ({queue}={cap} per UTC day, less during warm-up)"
                         )
                     raise NoAccountError(f"No account available for queue {queue}")
                 if no_active:

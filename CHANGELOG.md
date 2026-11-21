@@ -38,10 +38,11 @@ behaviour stays as in v0.22.x.
   a cap reached in the morning still holds in the evening. Accounts added before
   v0.23.0 start their clock on their first request under v0.23.0.
 - `BudgetExhaustedError(NoAccountError)`, exported from `twscrape`: raised
-  instead of `NoAccountError` when no account is free and every active account
-  is held by today's cap on the queue. It means out of capacity, not refused by
-  X. If any account is held by something else (refusal, cooldown, rate limit),
-  the error stays `NoAccountError`, so an outage is not reported as capacity.
+  instead of `NoAccountError` when no account is free and at least one active
+  account is held by today's cap on the queue, even if the others are held by a
+  refusal, cooldown or rate limit. It means out of capacity: X still lets the
+  capped account search, so callers must not treat it as an outage. Without a
+  capped account the error stays `NoAccountError`.
 - `API.search(q, limit=-1, kv=None, max_pages=None)` and `API.search_raw` cap
   the HTTP requests of one call with `max_pages`, counting every page request,
   also the cursor-only pages followed on their own. `max_pages=1` sends exactly

@@ -256,12 +256,13 @@ export TWS_WARMUP_START_FRACTION=0.1                        # ...starting at 10 
 - **Daily caps.** Every request sent on a capped queue is counted before it is
   sent (failed ones too, as X counts them), per UTC day, in the account's stats
   in `accounts.db`. The request that reaches the cap is sent; then the account's
-  queue is locked until the next UTC midnight. When no account is free and
-  every active account is held on that queue by its cap, `raise_when_no_account`
-  raises `BudgetExhaustedError` (a `NoAccountError`): the pool is out of
-  capacity for today. If any account is held by something else (a refusal, a
-  cooldown, a rate limit), it raises the plain `NoAccountError`, since that may
-  be an outage.
+  queue is locked until the next UTC midnight. When no account is free and at
+  least one active account is held on that queue by its cap,
+  `raise_when_no_account` raises `BudgetExhaustedError` (a `NoAccountError`):
+  the pool is out of capacity for today, even if X refuses the other accounts,
+  because the capped one could still search. Only a pool without a capped
+  account (every account refused, cooling down or rate limited) raises the plain
+  `NoAccountError`, since that may be an outage.
 - **Warm-up.** An account's age is counted from its first request under a
   budget (stored once as `__first_used__`) to the start of the current UTC day,
   so its cap and pace stay the same all day and step at midnight. Its fraction is
