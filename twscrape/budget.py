@@ -112,12 +112,19 @@ class AccountBudget:
     def fraction(self, first_used: datetime | None, now: datetime) -> float:
         """The warm-up fraction: start + (1 - start) x min(1, age / days); 1.0 when warm-up is off.
 
-        Age is counted in days since the account's first budgeted request; an account without one is on day 0.
+        Age is counted in days from the account's first budgeted request to the start of the current UTC day, so
+        the cap and the pace stay the same all day (a cap reached in the morning still holds in the evening) and
+        step at midnight. An account without a first request, or first used today, is on day 0.
         """
         if self.warmup_days <= 0:
             return 1.0
         start = self.warmup_start_fraction
-        age = 0.0 if first_used is None else max(0.0, (now - first_used).total_seconds() / 86400)
+        day_start = start_of_utc_day(now)
+        age = (
+            0.0
+            if first_used is None
+            else max(0.0, (day_start - first_used).total_seconds() / 86400)
+        )
         return start + (1 - start) * min(1.0, age / self.warmup_days)
 
     def cap_for(self, queue: str, fraction: float = 1.0) -> int | None:
@@ -164,6 +171,11 @@ class AccountBudget:
 
 def utc_day(now: datetime) -> str:
     return now.astimezone(timezone.utc).date().isoformat()
+
+
+def start_of_utc_day(now: datetime) -> datetime:
+    day = now.astimezone(timezone.utc).date()
+    return datetime(day.year, day.month, day.day, tzinfo=timezone.utc)
 
 
 def next_utc_midnight(now: datetime) -> int:
