@@ -1212,3 +1212,70 @@ async def test_the_quarantines_own_close_keeps_it_a_refusal_also_a_second_later(
     await client._close_ctx()
 
     assert await pool.accounts_refused("SearchTimeline") == ["user1"]
+
+
+async def test_a_delayed_quarantine_close_does_not_revive_a_lifted_quarantine(
+    httpx_mock: HTTPXMock, client_fixture: CF, monkeypatch
+):
+    """api.adanos.org#3592 round 1: the quarantine was written, then (before the close) the account was unlocked
+    and an own search with it returned data. The close wrote the quarantine again, byte-identical, and the account
+    counted as refused without a new refusal. The quarantine is written once; the close writes no refusal."""
+    pool, client = client_fixture
+    monkeypatch.setattr("twscrape.queue_client.asyncio.sleep", _mock_sleep)
+    monkeypatch.delenv("TWS_SEARCH_REFUSAL_FIRST_LOCK_SECONDS", raising=False)
+    real_quarantine = pool.quarantine_refused
+    calls = []
+
+    async def quarantine_then_lifted(username, queue, until, *args, **kwargs):
+        await real_quarantine(username, queue, until, *args, **kwargs)
+        calls.append(username)
+        if len(calls) == 1:  # meanwhile: an operator's unlock, then an own search that returned data
+            await pool.unlock(username, queue)
+            await pool.reset_refusals(username, queue)
+
+    monkeypatch.setattr(pool, "quarantine_refused", quarantine_then_lifted)
+    real_end_lease = client._end_lease
+    refused_after_close = []
+
+    async def end_lease_then_look(ctx, reset_at, inactive, msg, global_lock, refusal=False):
+        await real_end_lease(ctx, reset_at, inactive, msg, global_lock, refusal)
+        if refusal:
+            refused_after_close.append(await pool.accounts_refused("SearchTimeline"))
+
+    monkeypatch.setattr(client, "_end_lease", end_lease_then_look)
+    await client._close_ctx()
+    await _free_both_accounts(pool)
+    httpx_mock.add_response(url=URL, json=REFUSED, status_code=200)
+    httpx_mock.add_response(url=CONTROL_URL, json=CONTROL_OK, status_code=200)
+    httpx_mock.add_response(url=URL, json={"foo": "ok"}, status_code=200)
+    await client.get(URL)
+
+    assert refused_after_close == [[]]
+
+
+async def test_a_cancelled_close_is_a_pending_release_for_drain(pool_mock: AccountsPool, monkeypatch):
+    """api.adanos.org#3592 round 1: a cancelled close left its shielded release waiting for the database, and
+    drain() reported 0 pending with the 15-minute lease still held. The close's release is registered first."""
+    import asyncio
+
+    await pool_mock.add_account("user1", "p", "e", "ep", cookies="auth_token=t; ct0=c")
+    client = QueueClient(pool_mock, "SearchTimeline")
+    account = await pool_mock.get_for_queue("SearchTimeline")
+    assert account is not None
+    client.ctx = client._ctx_for(account)
+    real_unlock = pool_mock.unlock
+
+    async def slow_unlock(*args, **kwargs):
+        await asyncio.sleep(0.3)
+        return await real_unlock(*args, **kwargs)
+
+    monkeypatch.setattr(pool_mock, "unlock", slow_unlock)
+    closing = asyncio.create_task(client._close_ctx())
+    await asyncio.sleep(0.05)
+    closing.cancel()
+    await asyncio.gather(closing, return_exceptions=True)
+
+    assert await pool_mock.drain(timeout=0.01) == 1
+    assert await pool_mock.drain() == 0
+    lock = (await pool_mock.get("user1")).locks.get("SearchTimeline")
+    assert lock is None or (lock - utc.now()).total_seconds() <= 1

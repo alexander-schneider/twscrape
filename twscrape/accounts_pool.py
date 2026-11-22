@@ -366,6 +366,22 @@ class AccountsPool:
         """
         await execute(self._db_file, qs, {"username": username})
 
+    async def add_requests(self, username: str, queue: str, req_count: int) -> None:
+        """Counts `req_count` more requests of the account on `queue`; touches no lock."""
+        qs = f"""
+        UPDATE accounts SET
+            stats = json_set(stats, '$.{queue}', COALESCE(json_extract(stats, '$.{queue}'), 0) + :req_count)
+        WHERE username = :username
+        """
+        await execute(self._db_file, qs, {"username": username, "req_count": int(req_count)})
+
+    def track_release(self, release: "asyncio.Future") -> None:
+        """Keeps a lease release until it ran, so drain() waits for it also when its caller was cancelled."""
+        self._pending_releases.add(release)
+        release.add_done_callback(self._pending_releases.discard)
+        # Retrieve its outcome when it ends, so an error there is not reported as never retrieved.
+        release.add_done_callback(lambda done: done.cancelled() or done.exception())
+
     async def record_refusal(self, username: str, queue: str) -> int:
         """Counts one more consecutive refusal of `queue` for the account and returns the new count."""
         path = f'$."{REFUSALS_STATS_KEY}"."{queue}"'
@@ -449,7 +465,7 @@ class AccountsPool:
     async def quarantine_refused(self, username: str, queue: str, until: int, req_count=0) -> None:
         """Holds the account on `queue` until `until` because X refused it: the lock, the refusal expiry and the
         lock value it wrote in one statement, so no cancellation leaves one without the other (api.adanos.org#3585
-        rounds 2 and 5). The quarantine's own close writes through here too, never through lock_until."""
+        rounds 2 and 5). It is the only write of a quarantine: its close adds none (api.adanos.org#3592 round 1)."""
         path = f'$."{REFUSED_UNTIL_STATS_KEY}"."{queue}"'
         lock = f'$."{REFUSED_LOCK_STATS_KEY}"."{queue}"'
         qs = f"""
@@ -539,18 +555,23 @@ class AccountsPool:
                 await asyncio.shield(release)
             raise
 
+    def pending(self) -> set[asyncio.Future]:
+        """The lookups, releases and detached database operations still running; pools on one process share the
+        detached ones, so a caller with several pools counts their union (api.adanos.org#3592 round 1)."""
+        from .db import pending_detached
+
+        return self._pending_lookups | self._pending_releases | pending_detached()
+
     async def drain(self, timeout: float | None = None) -> int:
         """Waits for the account lookups, releases and database operations that cancelled callers left running;
         call it before the event loop closes, e.g. at a worker shutdown (api.adanos.org#3585 rounds 3 and 4).
 
         Returns how many are still running: 0 when all finished, more when `timeout` (seconds) ran out first, so a
         shutdown stays inside its stop grace. Cancelling drain() cancels none of them."""
-        from .db import pending_detached
-
         loop = asyncio.get_running_loop()
         deadline = None if timeout is None else loop.time() + timeout
         while True:
-            pending = self._pending_lookups | self._pending_releases | pending_detached()
+            pending = self.pending()
             if not pending:
                 return 0
             left = None if deadline is None else deadline - loop.time()

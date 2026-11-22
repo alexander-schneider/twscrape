@@ -427,11 +427,14 @@ class QueueClient:
 
         ctx, self.ctx, self.req_count = self.ctx, None, 0
         # The lease ends first and shielded: a cancellation here or while the transport closes (a caller's deadline)
-        # must not leave the 15-minute in-use lock (api.adanos.org#3565).
+        # must not leave the 15-minute in-use lock (api.adanos.org#3565). It is a pending release from the start, so
+        # drain() waits for it also when this close was cancelled (api.adanos.org#3592 round 1).
+        release = asyncio.ensure_future(
+            self._end_lease(ctx, reset_at, inactive, msg, global_lock, refusal)
+        )
+        self.pool.track_release(release)
         try:
-            await asyncio.shield(
-                self._end_lease(ctx, reset_at, inactive, msg, global_lock, refusal)
-            )
+            await asyncio.shield(release)
         finally:
             await ctx.aclose()
 
@@ -453,16 +456,23 @@ class QueueClient:
         floor = self._budget_floor(ctx)
         if floor:
             self._budget_floors[username] = floor
+
+        if refusal:
+            # _quarantine_refused_search wrote the quarantine once; its close writes no refusal, so a delayed close
+            # cannot revive a quarantine lifted meanwhile (api.adanos.org#3592 round 1). A pace or cap that outlasts
+            # it holds the account with an ordinary lock, which ends the marker: the expiry is never extended.
+            if floor > reset_at:
+                await self.pool.lock_until(username, self.queue, floor, ctx.req_count)
+            elif ctx.req_count:
+                await self.pool.add_requests(username, self.queue, ctx.req_count)
+            return
+
+        if floor:
             reset_at = max(reset_at, floor)
 
         if reset_at > 0:
             if global_lock:
                 await self.pool.lock_until(ctx.acc.username, GLOBAL_LOCK_QUEUE, reset_at)
-            if refusal:
-                # The refusal quarantine's own close writes its lock and that value with the marker again (a later
-                # budget floor extends both); any other lock ends the marker (api.adanos.org#3585 round 5).
-                await self.pool.quarantine_refused(username, self.queue, reset_at, ctx.req_count)
-                return
             await self.pool.lock_until(ctx.acc.username, self.queue, reset_at, ctx.req_count)
             return
 
@@ -497,8 +507,8 @@ class QueueClient:
         username = self.ctx.acc.username
         refusals = await self.pool.record_refusal(username, self.queue)
         lock_seconds = search_refusal_lock_seconds(refusals)
-        # The lock and the refusal expiry in one write (api.adanos.org#3585 round 2); _close_ctx writes the same
-        # quarantine again, from the same `until`.
+        # The lock, the refusal expiry and the lock value in one write, the only one (api.adanos.org#3585 round 2,
+        # #3592 round 1); the close below adds no refusal.
         until = utc.ts() + lock_seconds
         await self.pool.quarantine_refused(username, self.queue, until)
         logger.warning(

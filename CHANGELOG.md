@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.23.9 - 2026-11-22
+
+- A refusal quarantine is written once, by `quarantine_refused()`; the close after it writes no refusal. A close
+  delayed past an unlock and a working search no longer revives the lifted quarantine byte-identically.
+- Pacing or a cap that outlasts the quarantine holds the account with an ordinary lock, which ends the marker:
+  the refusal expiry is never extended by a pacing deadline (fail closed).
+- A `QueueClient` close registers its lease release with the pool before it waits, so `drain()` also waits for it
+  when the close was cancelled. New `AccountsPool.track_release()` and `add_requests()`.
+- `AccountsPool.pending()` lists what `drain()` waits for, so a caller with several pools counts their union once.
+
 ## v0.23.8 - 2026-11-22
 
 - A refusal counts only while the account's current lock is byte-identical to the lock its own quarantine wrote:

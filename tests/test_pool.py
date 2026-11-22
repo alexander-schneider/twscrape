@@ -683,3 +683,15 @@ async def test_drain_returns_at_its_timeout_with_what_is_still_pending(pool_mock
     assert left == 1
     assert not slow.cancelled()
     slow.cancel()
+
+
+async def test_pending_lists_what_drain_waits_for(pool_mock: AccountsPool):
+    """api.adanos.org#3592 round 1: a caller with several pools counts the union of their pending work once."""
+    import asyncio
+
+    slow = asyncio.ensure_future(asyncio.sleep(5))
+    pool_mock._pending_releases.add(slow)
+    slow.add_done_callback(pool_mock._pending_releases.discard)
+
+    assert pool_mock.pending() == {slow}
+    slow.cancel()

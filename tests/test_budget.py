@@ -775,6 +775,24 @@ async def test_a_paced_search_signs_once_and_a_404_still_takes_the_refusal_path(
     assert 1800 - 5 <= await lock_seconds(pool, "user1") <= 1800  # first refusal: 30 minutes
 
 
+async def test_pacing_does_not_extend_the_refusal_expiry(httpx_mock: HTTPXMock, tmp_path, monkeypatch):
+    """api.adanos.org#3592 round 1: with SearchTimeline=3600 pacing the quarantine's close copied the later pacing
+    deadline into the lock and the refusal expiry, so the account still counted as refused after the 30-minute
+    refusal interval. The pacing lock stays; it is no refusal (fail closed), and the expiry is never extended."""
+    pool = await make_pool(tmp_path, monkeypatch, TWS_ACCOUNT_PACING="SearchTimeline=3600")
+    httpx_mock.add_response(url=URL, status_code=404, text="")
+    httpx_mock.add_response(url=CONTROL_URL, json=CONTROL_OK)
+    httpx_mock.add_response(url=URL, json=SEARCH_PAGE)
+
+    async with QueueClient(pool, "SearchTimeline") as client:
+        await client.get(URL)
+
+    assert await lock_seconds(pool, "user1") > 1800  # pacing still holds the account
+    until = ((await raw_stats(pool, "user1")).get("__search_refused_until__") or {}).get("SearchTimeline")
+    assert until is None or until <= utc.ts() + 1800
+    assert await pool.accounts_refused("SearchTimeline") == []
+
+
 # --- concurrent reservations --------------------------------------------------------------------------------
 
 
