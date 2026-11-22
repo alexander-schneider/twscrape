@@ -1116,3 +1116,13 @@ async def test_reset_locks_ends_the_refusal_expiry(pool_mock: AccountsPool):
     await pool_mock.mark_refused_until("user1", "SearchTimeline", utc.ts() + 600)
     await pool_mock.reset_locks()
     assert await pool_mock.accounts_refused("SearchTimeline") == []
+
+
+async def test_a_refusal_marker_without_a_live_lock_is_no_refusal(pool_mock: AccountsPool):
+    """api.adanos.org#3585 round 2: anything that removes the SearchTimeline lock but keeps the stats (an operator's
+    one-account unlock, a relogin, a save of an older Account) left a free account "refused" for hours."""
+    await pool_mock.add_account("user1", "p", "e", "ep", cookies="auth_token=t; ct0=c")
+    await pool_mock.mark_refused_until("user1", "SearchTimeline", utc.ts() + 600)
+    assert await pool_mock.accounts_refused("SearchTimeline") == []
+    await pool_mock.lock_until("user1", "SearchTimeline", utc.ts() + 600)
+    assert await pool_mock.accounts_refused("SearchTimeline") == ["user1"]

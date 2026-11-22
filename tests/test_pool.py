@@ -538,3 +538,32 @@ async def test_a_cancellation_during_acquisition_leaves_no_lease(pool_mock: Acco
 
     lock = (await pool.get("user1")).locks.get("SearchTimeline")
     assert lock is None or (lock - utc.now()).total_seconds() <= 1
+
+
+async def test_a_cancelled_acquisition_has_released_its_lease_when_the_cancellation_completes(
+    pool_mock: AccountsPool, monkeypatch
+):
+    """api.adanos.org#3585 round 2: the release ran after the cancelled task had finished; an event loop closed
+    right then (worker shutdown) left the committed 15-minute lease. It is released before the cancellation
+    completes."""
+    import asyncio
+
+    pool = AccountsPool(pool_mock._db_file, wait_timeout=900, raise_when_no_account=True)
+    await pool.add_account("user1", "p", "e", "ep", cookies="auth_token=t; ct0=c")
+    real_get_and_lock = pool._get_and_lock
+    committed = asyncio.Event()
+
+    async def slow_return(queue, condition):
+        account = await real_get_and_lock(queue, condition)
+        committed.set()
+        await asyncio.sleep(0.05)
+        return account
+
+    monkeypatch.setattr(pool, "_get_and_lock", slow_return)
+    waiter = asyncio.create_task(pool.get_for_queue_or_wait("SearchTimeline"))
+    await asyncio.wait_for(committed.wait(), 5)
+    waiter.cancel()
+    await asyncio.gather(waiter, return_exceptions=True)
+
+    lock = (await pool.get("user1")).locks.get("SearchTimeline")
+    assert lock is None or (lock - utc.now()).total_seconds() <= 1

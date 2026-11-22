@@ -78,6 +78,8 @@ class AccountsPool:
         self._raise_when_no_account = raise_when_no_account
         self._wait_timeout = wait_timeout
         self._wait_interval = wait_interval
+        # Releases of leases whose caller was cancelled, kept until they ran (api.adanos.org#3585).
+        self._pending_releases: set[asyncio.Future] = set()
         # Read once, so a malformed TWS_ACCOUNT_PACING etc. fails here, not on the first request.
         self.budget = AccountBudget.from_env()
 
@@ -368,7 +370,9 @@ class AccountsPool:
         )
         return utc.from_iso(rs[0]) if rs and rs[0] else utc.now()
 
-    async def count_request(self, username: str, queue: str, cap: int | None) -> int | None:
+    async def count_request(
+        self, username: str, queue: str, cap: int | None, now: datetime | None = None
+    ) -> int | None:
         """Counts one request of the account on `queue` for today (UTC) before it is sent; returns the new count.
 
         One UPDATE checks the cap and increments, so two processes cannot both pass a full cap. Returns None and
@@ -391,7 +395,7 @@ class AccountsPool:
         read = f"""
         SELECT changes(), json_extract(stats, '{path}.count') FROM accounts WHERE username = :username
         """
-        params = {"username": username, "day": utc_day(utc.now()), "cap": cap}
+        params = {"username": username, "day": utc_day(now or utc.now()), "cap": cap}
         rs = await execute_then_fetchone(self._db_file, qs, read, params)
         if not rs or rs[0] != 1 or rs[1] is None:
             return None
@@ -414,12 +418,27 @@ class AccountsPool:
         qs = f"UPDATE accounts SET stats = json_set(stats, '{path}', :until) WHERE username = :username"
         await execute(self._db_file, qs, {"username": username, "until": int(until)})
 
+    async def quarantine_refused(self, username: str, queue: str, until: int) -> None:
+        """Holds the account on `queue` until `until` because X refused it: the lock and the refusal expiry in one
+        write, so no cancellation leaves one without the other (api.adanos.org#3585 round 2)."""
+        path = f'$."{REFUSED_UNTIL_STATS_KEY}"."{queue}"'
+        qs = f"""
+        UPDATE accounts SET
+            locks = json_set(locks, '$.{queue}', datetime(:until, 'unixepoch')),
+            stats = json_set(stats, '{path}', :until)
+        WHERE username = :username
+        """
+        await execute(self._db_file, qs, {"username": username, "until": int(until)})
+
     async def accounts_refused(self, queue: str) -> list[str]:
-        """Active accounts held on `queue` right now because X refused them (their refusal expiry is ahead)."""
+        """Active accounts held on `queue` right now because X refused them: the refusal expiry is ahead AND the
+        lock still holds. A marker whose lock was removed (an operator's unlock, a relogin, a save of an older
+        Account) is no hold (api.adanos.org#3585 round 2)."""
         path = f'$."{REFUSED_UNTIL_STATS_KEY}"."{queue}"'
         qs = f"""
         SELECT username FROM accounts
         WHERE active = true AND COALESCE(json_extract(stats, '{path}'), 0) > :now
+            AND datetime(json_extract(locks, '$.{queue}')) > datetime('now')
         ORDER BY username
         """
         rs = await fetchall(self._db_file, qs, {"now": utc.ts()})
@@ -461,13 +480,23 @@ class AccountsPool:
         try:
             return await asyncio.shield(task)
         except asyncio.CancelledError:
-            task.add_done_callback(lambda done: self._release_abandoned(done, queue))
+            # Release before the cancellation completes, so a loop closed right after (a worker shutdown) leaves no
+            # lease; a second cancellation meanwhile falls back to the callback (api.adanos.org#3585 round 2).
+            try:
+                account = await asyncio.shield(task)
+            except BaseException:
+                task.add_done_callback(lambda done: self._release_abandoned(done, queue))
+                raise
+            if account is not None:
+                await asyncio.shield(self.unlock(account.username, queue))
             raise
 
     def _release_abandoned(self, done: "asyncio.Future", queue: str) -> None:
         if done.cancelled() or done.exception() is not None or done.result() is None:
             return
-        asyncio.ensure_future(self.unlock(done.result().username, queue))
+        release = asyncio.ensure_future(self.unlock(done.result().username, queue))
+        self._pending_releases.add(release)  # keep a reference until it ran
+        release.add_done_callback(self._pending_releases.discard)
 
     async def _get_for_queue(self, queue: str):
         q = f"""
@@ -503,13 +532,16 @@ class AccountsPool:
             nat = await self.next_available_at(queue)
             no_active = not nat
             timed_out = deadline is not None and loop.time() >= deadline
+            timed_out_by_caps = False
+            capped_before: list[str] = []
             if deadline is not None and not timed_out:
                 # A cap lock ends with the UTC day: nobody waits for it, also when midnight is near
                 # (api.adanos.org#3565 follow-up). Only the other held accounts count for the wait.
-                capped = await self.accounts_held_by_cap(queue)
+                capped = capped_before = await self.accounts_held_by_cap(queue)
                 wait_s = await self.seconds_until_available(queue, exclude=capped)
                 # Every account is held for longer than the wait could last, e.g. quarantined from search, or
                 # only by its cap.
+                timed_out_by_caps = bool(capped) and wait_s is None
                 if (capped and wait_s is None) or (
                     wait_s is not None
                     and wait_s > max(deadline - loop.time(), IN_USE_LOCK_SECONDS + 60)
@@ -523,7 +555,14 @@ class AccountsPool:
 
             if give_up:
                 if raise_no_account:
-                    capped = await self.accounts_held_by_cap(queue)
+                    capped_again = await self.accounts_held_by_cap(queue)
+                    if capped_before and not capped_again and not no_active and timed_out_by_caps:
+                        # The caps that ended the wait are gone (a new UTC day began between the two reads): look
+                        # again instead of reporting an outage (api.adanos.org#3589).
+                        capped_before = []
+                        await asyncio.sleep(min(self._wait_interval, 1))
+                        continue
+                    capped = capped_again
                     # One active account held by its cap means X still lets it search: the pool is out of its
                     # own capacity, even if X refuses the others. Only a pool without a capped account is an
                     # outage the caller sees as NoAccountError (api.adanos.org#3565: no paid fallback for caps).
