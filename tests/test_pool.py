@@ -432,9 +432,9 @@ async def test_get_for_queue_or_wait_takes_an_account_freed_during_the_check(
     assert in_use is not None and in_use.username == "user2"
     seconds_until_available = pool.seconds_until_available
 
-    async def released_meanwhile(queue):
+    async def released_meanwhile(queue, exclude=None):
         await pool.unlock("user2", queue)
-        return await seconds_until_available(queue)
+        return await seconds_until_available(queue, exclude)
 
     monkeypatch.setattr(pool, "seconds_until_available", released_meanwhile)
 

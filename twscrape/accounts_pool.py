@@ -466,10 +466,15 @@ class AccountsPool:
             no_active = not nat
             timed_out = deadline is not None and loop.time() >= deadline
             if deadline is not None and not timed_out:
-                wait_s = await self.seconds_until_available(queue)
-                # Every account is held for longer than the wait could last, e.g. quarantined from search.
-                if wait_s is not None and wait_s > max(
-                    deadline - loop.time(), IN_USE_LOCK_SECONDS + 60
+                # A cap lock ends with the UTC day: nobody waits for it, also when midnight is near
+                # (api.adanos.org#3565 follow-up). Only the other held accounts count for the wait.
+                capped = await self.accounts_held_by_cap(queue)
+                wait_s = await self.seconds_until_available(queue, exclude=capped)
+                # Every account is held for longer than the wait could last, e.g. quarantined from search, or
+                # only by its cap.
+                if (capped and wait_s is None) or (
+                    wait_s is not None
+                    and wait_s > max(deadline - loop.time(), IN_USE_LOCK_SECONDS + 60)
                 ):
                     # An account in use may have come back since the first look; its lock is gone then.
                     account = await self.get_for_queue(queue)
@@ -536,9 +541,9 @@ class AccountsPool:
                 capped.append(row["username"])
         return capped
 
-    async def _earliest_unlock(self, queue: str) -> str | None:
+    async def _earliest_unlock(self, queue: str, exclude: list[str] | None = None) -> str | None:
         """When the first locked active account is free for `queue`: per account the later of its `queue` lock and
-        its global lock (both must have ended), then the earliest across accounts.
+        its global lock (both must have ended), then the earliest across accounts, leaving out `exclude`.
 
         Locks come in two formats (save writes ISO with a T and +00:00, lock_until 'YYYY-MM-DD HH:MM:SS'), so
         every comparison goes through julianday()/datetime(), never the text."""
@@ -550,15 +555,18 @@ class AccountsPool:
             WHERE active = true
                 AND lock_entry.key IN ('{queue}', '{GLOBAL_LOCK_QUEUE}')
                 AND lock_entry.value IS NOT NULL
+                AND accounts.username NOT IN (SELECT value FROM json_each(:exclude))
             GROUP BY accounts.username
         )
         """
-        rs = await fetchone(self._db_file, qs)
+        rs = await fetchone(self._db_file, qs, {"exclude": json.dumps(list(exclude or []))})
         return rs[0] if rs and rs[0] else None
 
-    async def seconds_until_available(self, queue: str) -> float | None:
+    async def seconds_until_available(
+        self, queue: str, exclude: list[str] | None = None
+    ) -> float | None:
         """Seconds until the first locked active account is free for `queue` (see `_earliest_unlock`)."""
-        lock_until = await self._earliest_unlock(queue)
+        lock_until = await self._earliest_unlock(queue, exclude)
         if lock_until is None:
             return None
         return max(0.0, (utc.from_iso(lock_until) - utc.now()).total_seconds())
