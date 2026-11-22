@@ -886,4 +886,4 @@ async def test_a_capped_account_does_not_stop_the_wait_for_a_paced_one(tmp_path,
     account = await asyncio.wait_for(
         waiting_pool(pool, wait_timeout=900).get_for_queue_or_wait("SearchTimeline"), 10
     )
-    assert account.username == "user2"
+    assert account is not None and account.username == "user2"
