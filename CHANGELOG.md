@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.23.3 - 2026-11-22
+
+- A pool waits for no account that only its daily cap holds: the wait counts only the other held accounts, so a
+  pool held by its caps raises `BudgetExhaustedError` at once also shortly before UTC midnight, when the cap lock
+  ends sooner than the wait limit (it waited for the next UTC day before).
+
 ## v0.23.2 - 2026-11-21
 
 - `API.search`, `API.search_raw` and `_gql_items` take an optional `on_page` callback, called once for every page
