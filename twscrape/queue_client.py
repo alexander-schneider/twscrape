@@ -476,6 +476,7 @@ class QueueClient:
         username = self.ctx.acc.username
         refusals = await self.pool.record_refusal(username, self.queue)
         lock_seconds = search_refusal_lock_seconds(refusals)
+        await self.pool.mark_refused_until(username, self.queue, utc.ts() + lock_seconds)
         logger.warning(
             f"Search refused for {username} ({reason}, {refusals} in a row); "
             f"no searches with it for {lock_seconds}s"

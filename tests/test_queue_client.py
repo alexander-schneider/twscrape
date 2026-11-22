@@ -1086,3 +1086,33 @@ async def test_a_5xx_is_transient_also_in_debug_mode(httpx_mock: HTTPXMock, clie
             await client.get(URL)
 
     assert await _search_lock_hours(pool) == {}
+
+
+async def test_a_refusal_quarantine_records_its_own_expiry(httpx_mock: HTTPXMock, client_fixture: CF, monkeypatch):
+    """api.adanos.org#3585: a caller asks whether accounts are held because X refused them. The refusal streak only
+    ends with a search that returns data, so an old streak plus any later lock (a proxy cooldown, an in-use lease)
+    looked like a quarantine. The quarantine now records its own expiry, and only that counts."""
+    pool, client = client_fixture
+    monkeypatch.setattr("twscrape.queue_client.asyncio.sleep", _mock_sleep)
+    monkeypatch.delenv("TWS_SEARCH_REFUSAL_FIRST_LOCK_SECONDS", raising=False)
+
+    await _refuse_user1(httpx_mock, pool, client)
+    await client._close_ctx()
+    assert await pool.accounts_refused("SearchTimeline") == ["user1"]
+
+    # The quarantine ran out; the streak stays. A new ordinary lock is no refusal.
+    await pool.mark_refused_until("user1", "SearchTimeline", utc.ts() - 1)
+    await pool.lock_until("user1", "SearchTimeline", utc.ts() + 60)
+    assert await pool.accounts_refused("SearchTimeline") == []
+
+    # A search with timeline data ends the streak and the expiry.
+    await pool.mark_refused_until("user1", "SearchTimeline", utc.ts() + 600)
+    await _search_user1(httpx_mock, pool, client, SEARCH_PAGE)
+    await client._close_ctx()
+    assert await pool.accounts_refused("SearchTimeline") == []
+
+
+async def test_reset_locks_ends_the_refusal_expiry(pool_mock: AccountsPool):
+    await pool_mock.mark_refused_until("user1", "SearchTimeline", utc.ts() + 600)
+    await pool_mock.reset_locks()
+    assert await pool_mock.accounts_refused("SearchTimeline") == []
