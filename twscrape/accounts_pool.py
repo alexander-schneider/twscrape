@@ -366,6 +366,22 @@ class AccountsPool:
         """
         await execute(self._db_file, qs, {"username": username})
 
+    async def add_requests(self, username: str, queue: str, req_count: int) -> None:
+        """Counts `req_count` more requests of the account on `queue`; touches no lock."""
+        qs = f"""
+        UPDATE accounts SET
+            stats = json_set(stats, '$.{queue}', COALESCE(json_extract(stats, '$.{queue}'), 0) + :req_count)
+        WHERE username = :username
+        """
+        await execute(self._db_file, qs, {"username": username, "req_count": int(req_count)})
+
+    def track_release(self, release: "asyncio.Future") -> None:
+        """Keeps a lease release until it ran, so drain() waits for it also when its caller was cancelled."""
+        self._pending_releases.add(release)
+        release.add_done_callback(self._pending_releases.discard)
+        # Retrieve its outcome when it ends, so an error there is not reported as never retrieved.
+        release.add_done_callback(lambda done: done.cancelled() or done.exception())
+
     async def record_refusal(self, username: str, queue: str) -> int:
         """Counts one more consecutive refusal of `queue` for the account and returns the new count."""
         path = f'$."{REFUSALS_STATS_KEY}"."{queue}"'
@@ -449,7 +465,7 @@ class AccountsPool:
     async def quarantine_refused(self, username: str, queue: str, until: int, req_count=0) -> None:
         """Holds the account on `queue` until `until` because X refused it: the lock, the refusal expiry and the
         lock value it wrote in one statement, so no cancellation leaves one without the other (api.adanos.org#3585
-        rounds 2 and 5). The quarantine's own close writes through here too, never through lock_until."""
+        rounds 2 and 5). It is the only write of a quarantine: its close adds none (api.adanos.org#3592 round 1)."""
         path = f'$."{REFUSED_UNTIL_STATS_KEY}"."{queue}"'
         lock = f'$."{REFUSED_LOCK_STATS_KEY}"."{queue}"'
         qs = f"""
