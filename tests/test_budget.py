@@ -793,6 +793,28 @@ async def test_pacing_does_not_extend_the_refusal_expiry(httpx_mock: HTTPXMock, 
     assert await pool.accounts_refused("SearchTimeline") == []
 
 
+async def test_a_delayed_pacing_lock_does_not_shorten_a_newer_429(httpx_mock: HTTPXMock, tmp_path, monkeypatch):
+    """api.adanos.org#3592 follow-up: the quarantine's close sets the pacing floor as an ordinary lock. A newer
+    6-hour 429 lock written between the quarantine and that close was cut back to the floor. The floor lock is
+    written only while the quarantine still owns the lock."""
+    pool = await make_pool(tmp_path, monkeypatch, TWS_ACCOUNT_PACING="SearchTimeline=3600")
+    real_quarantine = pool.quarantine_refused
+
+    async def quarantine_then_a_429(username, queue, until, *args, **kwargs):
+        await real_quarantine(username, queue, until, *args, **kwargs)
+        await pool.lock_until(username, queue, utc.ts() + 6 * 3600)  # a newer 6-hour 429 window meanwhile
+
+    monkeypatch.setattr(pool, "quarantine_refused", quarantine_then_a_429)
+    httpx_mock.add_response(url=URL, status_code=404, text="")
+    httpx_mock.add_response(url=CONTROL_URL, json=CONTROL_OK)
+    httpx_mock.add_response(url=URL, json=SEARCH_PAGE)
+
+    async with QueueClient(pool, "SearchTimeline") as client:
+        await client.get(URL)
+
+    assert await lock_seconds(pool, "user1") > 6 * 3600 - 60
+
+
 # --- concurrent reservations --------------------------------------------------------------------------------
 
 
