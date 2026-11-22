@@ -371,12 +371,17 @@ class QueueClient:
                 await asyncio.sleep(wait)
         if ctx.first_used is None:
             ctx.first_used = await self.pool.first_used(ctx.acc.username)
-        fraction = self.budget.fraction(ctx.first_used, utc.now())
+        charged_at = utc.now()
+        fraction = self.budget.fraction(ctx.first_used, charged_at)
         cap = self.budget.cap_for(self.queue, fraction)
         if cap is not None:
-            count = await self.pool.count_request(ctx.acc.username, self.queue, cap)
+            # The count and its cap lock belong to the UTC day of the charge, also when the call returns after
+            # midnight (api.adanos.org#3589).
+            count = await self.pool.count_request(
+                ctx.acc.username, self.queue, cap, now=charged_at
+            )
             if count is None or count >= cap:
-                ctx.cap_until = next_utc_midnight(utc.now())
+                ctx.cap_until = next_utc_midnight(charged_at)
             if count is None:
                 raise DailyCapReached(
                     f"{ctx.acc.username} used its daily cap of {cap} on {self.queue}"
@@ -427,7 +432,9 @@ class QueueClient:
         finally:
             await ctx.aclose()
 
-    async def _end_lease(self, ctx: "Ctx", reset_at: int, inactive: bool, msg: str | None, global_lock: bool):
+    async def _end_lease(
+        self, ctx: "Ctx", reset_at: int, inactive: bool, msg: str | None, global_lock: bool
+    ):
         username = ctx.acc.username
         if inactive:
             await self.pool.mark_inactive(username, msg, queue=self.queue, req_count=ctx.req_count)
@@ -476,7 +483,8 @@ class QueueClient:
         username = self.ctx.acc.username
         refusals = await self.pool.record_refusal(username, self.queue)
         lock_seconds = search_refusal_lock_seconds(refusals)
-        await self.pool.mark_refused_until(username, self.queue, utc.ts() + lock_seconds)
+        # The lock and the refusal expiry in one write (api.adanos.org#3585 round 2); _close_ctx keeps that lock.
+        await self.pool.quarantine_refused(username, self.queue, utc.ts() + lock_seconds)
         logger.warning(
             f"Search refused for {username} ({reason}, {refusals} in a row); "
             f"no searches with it for {lock_seconds}s"

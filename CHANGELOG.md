@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.23.5 - 2026-11-22
+
+- `accounts_refused(queue)` counts an account only while its refusal expiry is ahead AND its lock still holds; a
+  quarantine writes both in one statement (`quarantine_refused`). A marker whose lock an operator, a relogin or
+  a save of an older Account removed is no refusal any more.
+- A cancelled acquisition releases its committed lease before the cancellation completes (a loop closed right
+  after, as at a worker shutdown, left it locked); a second cancellation falls back to a callback whose task is
+  kept until it ran.
+- A cap that disappears between the two reads at UTC midnight (the first finds the pool capped, the second sees
+  the new day) makes the pool look again instead of raising NoAccountError.
+- The daily count and its cap lock belong to the UTC day of the charge, also when the call returns after
+  midnight (the lock ran a day too long).
+
 ## v0.23.4 - 2026-11-22
 
 - A search refusal quarantine records its own expiry (`__search_refused_until__` in the stats JSON, per queue) and
