@@ -831,3 +831,37 @@ async def test_a_cancellation_while_the_transport_closes_still_ends_the_lease(
         assert 58 <= seconds <= 85  # the pace floor, not the in-use lease
     else:
         assert seconds <= 1  # released
+
+
+async def test_a_capped_pool_shortly_before_utc_midnight_gives_up_at_once(tmp_path, monkeypatch):
+    """api.adanos.org#3565 follow-up: at 23:50 UTC the cap lock ends in 10 minutes, less than the wait limit, so the
+    pool waited for the next UTC day instead of reporting the spent capacity. Nobody should wait for a cap reset."""
+    pool = await make_pool(tmp_path, monkeypatch, accounts=1, TWS_ACCOUNT_DAILY_CAPS="SearchTimeline=400")
+    await set_stat(pool, "user1", "__daily__", {"SearchTimeline": {"day": utc.now().date().isoformat(), "count": 400}})
+    await pool.lock_until("user1", "SearchTimeline", utc.ts() + 600)  # the cap lock until "midnight", 10 min away
+    real_sleep = asyncio.sleep
+
+    async def short_sleep(*args, **kwargs):
+        await real_sleep(0.01)
+
+    monkeypatch.setattr("twscrape.accounts_pool.asyncio.sleep", short_sleep)
+
+    with pytest.raises(BudgetExhaustedError):
+        await asyncio.wait_for(waiting_pool(pool, wait_timeout=900).get_for_queue_or_wait("SearchTimeline"), 5)
+
+
+async def test_a_capped_account_does_not_stop_the_wait_for_a_paced_one(tmp_path, monkeypatch):
+    """The other account is only paced (free in 2 s): the pool waits for it, as before."""
+    pool = await make_pool(tmp_path, monkeypatch, accounts=2, TWS_ACCOUNT_DAILY_CAPS="SearchTimeline=400")
+    await set_stat(pool, "user1", "__daily__", {"SearchTimeline": {"day": utc.now().date().isoformat(), "count": 400}})
+    await pool.lock_until("user1", "SearchTimeline", utc.ts() + 600)
+    await pool.lock_until("user2", "SearchTimeline", utc.ts() + 2)
+    real_sleep = asyncio.sleep
+
+    async def short_sleep(*args, **kwargs):
+        await real_sleep(0.2)
+
+    monkeypatch.setattr("twscrape.accounts_pool.asyncio.sleep", short_sleep)
+
+    account = await asyncio.wait_for(waiting_pool(pool, wait_timeout=900).get_for_queue_or_wait("SearchTimeline"), 10)
+    assert account.username == "user2"
