@@ -1124,7 +1124,8 @@ async def test_a_refusal_marker_without_a_live_lock_is_no_refusal(pool_mock: Acc
     await pool_mock.add_account("user1", "p", "e", "ep", cookies="auth_token=t; ct0=c")
     await pool_mock.mark_refused_until("user1", "SearchTimeline", utc.ts() + 600)
     assert await pool_mock.accounts_refused("SearchTimeline") == []
-    await pool_mock.lock_until("user1", "SearchTimeline", utc.ts() + 600)
+    # Only the quarantine's own lock makes it a hold again (an ordinary lock would end the marker, round 4).
+    await pool_mock.lock_until("user1", "SearchTimeline", utc.ts() + 600, keep_refusal=True)
     assert await pool_mock.accounts_refused("SearchTimeline") == ["user1"]
 
 

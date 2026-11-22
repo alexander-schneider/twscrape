@@ -320,15 +320,18 @@ class AccountsPool:
         qs = "UPDATE accounts SET active = :active WHERE username = :username"
         await execute(self._db_file, qs, {"username": username, "active": active})
 
-    async def lock_until(self, username: str, queue: str, unlock_at: int, req_count=0):
-        # A lock shorter than the refusal quarantine replaces it: the marker ends with it (api.adanos.org#3585).
+    async def lock_until(
+        self, username: str, queue: str, unlock_at: int, req_count=0, keep_refusal: bool = False
+    ):
+        # Any ordinary lock replaces a refusal quarantine, whatever its length: the marker ends with it. Only the
+        # quarantine's own close passes keep_refusal (api.adanos.org#3585 rounds 3 and 4).
         marker = f'$."{REFUSED_UNTIL_STATS_KEY}"."{queue}"'
+        stats_base = "stats" if keep_refusal else f"json_remove(stats, '{marker}')"
         qs = f"""
         UPDATE accounts SET
             locks = json_set(locks, '$.{queue}', datetime({unlock_at}, 'unixepoch')),
             stats = json_set(
-                CASE WHEN COALESCE(json_extract(stats, '{marker}'), 0) > {int(unlock_at)}
-                    THEN json_remove(stats, '{marker}') ELSE stats END,
+                {stats_base},
                 '$.{queue}', COALESCE(json_extract(stats, '$.{queue}'), 0) + {req_count}
             ),
             last_used = datetime({utc.ts()}, 'unixepoch')
@@ -466,6 +469,8 @@ class AccountsPool:
             qs = f"""
             UPDATE accounts SET
                 locks = json_set(locks, '$.{queue}', datetime('now', '+15 minutes')),
+                -- A new lease ends a refusal marker left on the account (api.adanos.org#3585 round 4).
+                stats = json_remove(stats, '$."{REFUSED_UNTIL_STATS_KEY}"."{queue}"'),
                 last_used = datetime({utc.ts()}, 'unixepoch')
             WHERE username = {condition}
             RETURNING *
@@ -476,6 +481,8 @@ class AccountsPool:
             qs = f"""
             UPDATE accounts SET
                 locks = json_set(locks, '$.{queue}', datetime('now', '+15 minutes')),
+                -- A new lease ends a refusal marker left on the account (api.adanos.org#3585 round 4).
+                stats = json_remove(stats, '$."{REFUSED_UNTIL_STATS_KEY}"."{queue}"'),
                 last_used = datetime({utc.ts()}, 'unixepoch'),
                 _tx = '{tx}'
             WHERE username = {condition}
