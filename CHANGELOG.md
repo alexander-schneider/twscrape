@@ -8,6 +8,7 @@
   the refusal expiry is never extended by a pacing deadline (fail closed).
 - A `QueueClient` close registers its lease release with the pool before it waits, so `drain()` also waits for it
   when the close was cancelled. New `AccountsPool.track_release()` and `add_requests()`.
+- `AccountsPool.pending()` lists what `drain()` waits for, so a caller with several pools counts their union once.
 
 ## v0.23.8 - 2026-11-22
 

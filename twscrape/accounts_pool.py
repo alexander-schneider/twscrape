@@ -555,18 +555,23 @@ class AccountsPool:
                 await asyncio.shield(release)
             raise
 
+    def pending(self) -> set[asyncio.Future]:
+        """The lookups, releases and detached database operations still running; pools on one process share the
+        detached ones, so a caller with several pools counts their union (api.adanos.org#3592 round 1)."""
+        from .db import pending_detached
+
+        return self._pending_lookups | self._pending_releases | pending_detached()
+
     async def drain(self, timeout: float | None = None) -> int:
         """Waits for the account lookups, releases and database operations that cancelled callers left running;
         call it before the event loop closes, e.g. at a worker shutdown (api.adanos.org#3585 rounds 3 and 4).
 
         Returns how many are still running: 0 when all finished, more when `timeout` (seconds) ran out first, so a
         shutdown stays inside its stop grace. Cancelling drain() cancels none of them."""
-        from .db import pending_detached
-
         loop = asyncio.get_running_loop()
         deadline = None if timeout is None else loop.time() + timeout
         while True:
-            pending = self._pending_lookups | self._pending_releases | pending_detached()
+            pending = self.pending()
             if not pending:
                 return 0
             left = None if deadline is None else deadline - loop.time()
