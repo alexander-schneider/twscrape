@@ -1234,11 +1234,23 @@ async def test_a_delayed_quarantine_close_does_not_revive_a_lifted_quarantine(
             await pool.reset_refusals(username, queue)
 
     monkeypatch.setattr(pool, "quarantine_refused", quarantine_then_lifted)
+    real_end_lease = client._end_lease
+    refused_after_close = []
 
-    await _refuse_user1(httpx_mock, pool, client)
+    async def end_lease_then_look(ctx, reset_at, inactive, msg, global_lock, refusal=False):
+        await real_end_lease(ctx, reset_at, inactive, msg, global_lock, refusal)
+        if refusal:
+            refused_after_close.append(await pool.accounts_refused("SearchTimeline"))
+
+    monkeypatch.setattr(client, "_end_lease", end_lease_then_look)
     await client._close_ctx()
+    await _free_both_accounts(pool)
+    httpx_mock.add_response(url=URL, json=REFUSED, status_code=200)
+    httpx_mock.add_response(url=CONTROL_URL, json=CONTROL_OK, status_code=200)
+    httpx_mock.add_response(url=URL, json={"foo": "ok"}, status_code=200)
+    await client.get(URL)
 
-    assert await pool.accounts_refused("SearchTimeline") == []
+    assert refused_after_close == [[]]
 
 
 async def test_a_cancelled_close_is_a_pending_release_for_drain(pool_mock: AccountsPool, monkeypatch):
