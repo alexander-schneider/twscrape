@@ -366,6 +366,24 @@ class AccountsPool:
         """
         await execute(self._db_file, qs, {"username": username})
 
+    async def lock_until_if_quarantined(self, username: str, queue: str, unlock_at: int, req_count=0):
+        """An ordinary lock as lock_until, but only while the queue's lock is still the one the refusal quarantine
+        wrote: a newer lock (a 6-hour 429, a lease) is not cut back (api.adanos.org#3592 follow-up). The requests
+        are counted either way."""
+        lock = f'$."{REFUSED_LOCK_STATS_KEY}"."{queue}"'
+        owned = f"json_extract(locks, '$.{queue}') = json_extract(stats, '{lock}')"
+        qs = f"""
+        UPDATE accounts SET
+            locks = CASE WHEN {owned}
+                THEN json_set(locks, '$.{queue}', datetime({unlock_at}, 'unixepoch')) ELSE locks END,
+            stats = json_set(
+                CASE WHEN {owned} THEN {self._without_refusal(queue)} ELSE stats END,
+                '$.{queue}', COALESCE(json_extract(stats, '$.{queue}'), 0) + {int(req_count)}
+            )
+        WHERE username = :username
+        """
+        await execute(self._db_file, qs, {"username": username})
+
     async def add_requests(self, username: str, queue: str, req_count: int) -> None:
         """Counts `req_count` more requests of the account on `queue`; touches no lock."""
         qs = f"""

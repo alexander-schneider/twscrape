@@ -462,7 +462,8 @@ class QueueClient:
             # cannot revive a quarantine lifted meanwhile (api.adanos.org#3592 round 1). A pace or cap that outlasts
             # it holds the account with an ordinary lock, which ends the marker: the expiry is never extended.
             if floor > reset_at:
-                await self.pool.lock_until(username, self.queue, floor, ctx.req_count)
+                # Only while the quarantine still owns the lock: a newer one (a 6-hour 429) stays (#3592 follow-up).
+                await self.pool.lock_until_if_quarantined(username, self.queue, floor, ctx.req_count)
             elif ctx.req_count:
                 await self.pool.add_requests(username, self.queue, ctx.req_count)
             return
