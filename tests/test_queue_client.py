@@ -1126,3 +1126,23 @@ async def test_a_refusal_marker_without_a_live_lock_is_no_refusal(pool_mock: Acc
     assert await pool_mock.accounts_refused("SearchTimeline") == []
     await pool_mock.lock_until("user1", "SearchTimeline", utc.ts() + 600)
     assert await pool_mock.accounts_refused("SearchTimeline") == ["user1"]
+
+
+async def test_only_the_quarantines_own_lock_counts_and_an_ordinary_lock_ends_the_marker(pool_mock: AccountsPool):
+    """api.adanos.org#3585 round 3: a marker left over (a cancel after the write, a relogin, an older save) made any
+    later ordinary lock (a 429, a lease, a pace) count as a refusal. Only a lock that reaches the marker's own
+    expiry is the quarantine; an ordinary lock or an unlock that replaces it ends the marker."""
+    await pool_mock.add_account("user1", "p", "e", "ep", cookies="auth_token=t; ct0=c")
+    until = utc.ts() + 3600
+    await pool_mock.quarantine_refused("user1", "SearchTimeline", until)
+    assert await pool_mock.accounts_refused("SearchTimeline") == ["user1"]
+
+    await pool_mock.lock_until("user1", "SearchTimeline", utc.ts() + 900)  # a 429 window replaces the hold
+    assert await pool_mock.accounts_refused("SearchTimeline") == []
+    stats = (await pool_mock.get("user1")).stats
+    assert stats == {} or "SearchTimeline" in stats  # reserved keys never reach the Account model
+
+    await pool_mock.quarantine_refused("user1", "SearchTimeline", until)
+    await pool_mock.unlock("user1", "SearchTimeline")
+    await pool_mock.lock_until("user1", "SearchTimeline", until)  # the same time again, but no quarantine wrote it
+    assert await pool_mock.accounts_refused("SearchTimeline") == []
