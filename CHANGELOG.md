@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.23.7 - 2026-11-22
+
+- Any ordinary lock (`lock_until`), an unlock or a new lease ends the refusal marker, whatever its length; only
+  the quarantine's own close keeps it (`lock_until(..., keep_refusal=True)`, `_close_ctx(..., refusal=True)`). A
+  longer ordinary lock (a 1-hour 429 after a 30-minute quarantine) no longer counts as a refusal.
+
 ## v0.23.6 - 2026-11-22
 
 - A cancelled database operation still commits and closes its connection: every operation, the in-process lock

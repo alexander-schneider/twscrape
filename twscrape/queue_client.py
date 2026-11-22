@@ -420,6 +420,7 @@ class QueueClient:
         inactive=False,
         msg: str | None = None,
         global_lock=False,
+        refusal=False,
     ):
         if self.ctx is None:
             return
@@ -428,12 +429,20 @@ class QueueClient:
         # The lease ends first and shielded: a cancellation here or while the transport closes (a caller's deadline)
         # must not leave the 15-minute in-use lock (api.adanos.org#3565).
         try:
-            await asyncio.shield(self._end_lease(ctx, reset_at, inactive, msg, global_lock))
+            await asyncio.shield(
+                self._end_lease(ctx, reset_at, inactive, msg, global_lock, refusal)
+            )
         finally:
             await ctx.aclose()
 
     async def _end_lease(
-        self, ctx: "Ctx", reset_at: int, inactive: bool, msg: str | None, global_lock: bool
+        self,
+        ctx: "Ctx",
+        reset_at: int,
+        inactive: bool,
+        msg: str | None,
+        global_lock: bool,
+        refusal: bool = False,
     ):
         username = ctx.acc.username
         if inactive:
@@ -449,7 +458,10 @@ class QueueClient:
         if reset_at > 0:
             if global_lock:
                 await self.pool.lock_until(ctx.acc.username, GLOBAL_LOCK_QUEUE, reset_at)
-            await self.pool.lock_until(ctx.acc.username, self.queue, reset_at, ctx.req_count)
+            # Only the refusal quarantine's own close keeps its marker; any other lock ends it.
+            await self.pool.lock_until(
+                ctx.acc.username, self.queue, reset_at, ctx.req_count, keep_refusal=refusal
+            )
             return
 
         await self.pool.unlock(ctx.acc.username, self.queue, ctx.req_count)
@@ -489,7 +501,7 @@ class QueueClient:
             f"Search refused for {username} ({reason}, {refusals} in a row); "
             f"no searches with it for {lock_seconds}s"
         )
-        await self._close_ctx(utc.ts() + lock_seconds)
+        await self._close_ctx(utc.ts() + lock_seconds, refusal=True)
         acc = await self.pool.get_for_queue(self.queue)
         if acc is None:
             return False
