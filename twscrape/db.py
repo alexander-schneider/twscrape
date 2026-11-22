@@ -45,10 +45,15 @@ async def _run_shielded(func, *args, **kwargs):
         raise
 
 
+def pending_detached() -> set[asyncio.Future]:
+    """The database operations whose callers were cancelled and that still run."""
+    return set(_detached)
+
+
 async def drain_detached() -> None:
-    """Waits for the database operations whose callers were cancelled."""
+    """Waits for the database operations whose callers were cancelled; cancelling it cancels none of them."""
     while _detached:
-        await asyncio.gather(*list(_detached), return_exceptions=True)
+        await asyncio.wait(set(_detached))
 
 
 def lock_retry(max_retries=10):

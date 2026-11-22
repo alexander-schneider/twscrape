@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.23.8 - 2026-11-22
+
+- A refusal counts only while the account's current lock is byte-identical to the lock its own quarantine wrote:
+  `quarantine_refused()` stores that value with the expiry (`__search_refused_lock__`), and the quarantine's own
+  close writes through it again. Any other writer (an ordinary lock, a lease, a stale `save()` of an older
+  Account after a relogin, raw SQL) breaks the match and the account is no longer refused. This replaces the
+  `>=` comparison and `lock_until(..., keep_refusal=...)`, which is removed.
+- `AccountsPool.drain(timeout=None)` also waits for account lookups that a cancelled caller left running (their
+  lease is released when they return), no longer cancels what it waits for when drain() itself is cancelled, and
+  returns after `timeout` seconds with the number still running.
+- `db.pending_detached()` lists the database operations whose callers were cancelled; `drain_detached()` no
+  longer cancels them when it is cancelled.
+
 ## v0.23.7 - 2026-11-22
 
 - Any ordinary lock (`lock_until`), an unlock or a new lease ends the refusal marker, whatever its length; only
