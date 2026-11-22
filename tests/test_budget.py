@@ -956,24 +956,34 @@ async def test_a_debit_just_before_midnight_locks_until_the_charged_days_end(
 async def test_a_cap_vanishing_at_midnight_is_retried_also_next_to_a_quarantined_account(tmp_path, monkeypatch):
     """api.adanos.org#3589 round 2: user1 is capped until midnight, user2 quarantined for 6 h. The wait estimate
     without user1 is 6 h, so the pool gave up through the other branch and raised NoAccountError when the cap was
-    gone at the second read. Any vanished cap is retried."""
+    gone at the second read. Any vanished cap is retried. Midnight is a controlled step: the second cap read is the
+    moment the day changes, and only then the cap lock ends, so the account comes back only through the retry
+    (round 3: a real 1-second lock could expire on its own and let the test pass without a retry)."""
     pool = await make_pool(tmp_path, monkeypatch, accounts=2, TWS_ACCOUNT_DAILY_CAPS="SearchTimeline=400")
-    await pool.lock_until("user1", "SearchTimeline", utc.ts() + 1)  # the cap lock ends at "midnight"
+    await pool.lock_until("user1", "SearchTimeline", utc.ts() + 600)  # capped until "midnight"
     await pool.lock_until("user2", "SearchTimeline", utc.ts() + 6 * 3600)
-    reads = [["user1"], []]
+    reads = 0
     real_held = pool.accounts_held_by_cap
 
-    async def capped_until_midnight(queue):
-        return reads.pop(0) if reads else await real_held(queue)
+    async def midnight_at_the_second_read(queue):
+        nonlocal reads
+        reads += 1
+        if reads == 1:
+            return ["user1"]
+        if reads == 2:
+            await pool.unlock("user1", queue)  # the new UTC day: the cap and its lock end now
+            return []
+        return await real_held(queue)
 
     real_sleep = asyncio.sleep
 
     async def short_sleep(*args, **kwargs):
-        await real_sleep(0.3)
+        await real_sleep(0.05)
 
     waiting = waiting_pool(pool, wait_timeout=900)
-    monkeypatch.setattr(waiting, "accounts_held_by_cap", capped_until_midnight)
+    monkeypatch.setattr(waiting, "accounts_held_by_cap", midnight_at_the_second_read)
     monkeypatch.setattr("twscrape.accounts_pool.asyncio.sleep", short_sleep)
 
     account = await asyncio.wait_for(waiting.get_for_queue_or_wait("SearchTimeline"), 10)
     assert account is not None and account.username == "user1"
+    assert reads >= 2  # the retry looked again after the day changed

@@ -1146,3 +1146,23 @@ async def test_only_the_quarantines_own_lock_counts_and_an_ordinary_lock_ends_th
     await pool_mock.unlock("user1", "SearchTimeline")
     await pool_mock.lock_until("user1", "SearchTimeline", until)  # the same time again, but no quarantine wrote it
     assert await pool_mock.accounts_refused("SearchTimeline") == []
+
+
+async def test_any_ordinary_lock_or_lease_ends_the_refusal_marker(pool_mock: AccountsPool):
+    """api.adanos.org#3585 round 4: a LONGER ordinary lock (a 1-hour 429 after a 30-minute quarantine, or one written
+    after a save of an older Account) kept the marker and reached its expiry, so it counted as a refusal. Only the
+    quarantine's own close keeps the marker; any other lock, an unlock or a new lease ends it."""
+    await pool_mock.add_account("user1", "p", "e", "ep", cookies="auth_token=t; ct0=c")
+    until = utc.ts() + 1800
+    await pool_mock.quarantine_refused("user1", "SearchTimeline", until)
+    await pool_mock.lock_until("user1", "SearchTimeline", until, keep_refusal=True)  # the quarantine's own close
+    assert await pool_mock.accounts_refused("SearchTimeline") == ["user1"]
+
+    await pool_mock.lock_until("user1", "SearchTimeline", utc.ts() + 3600)  # a 1-hour 429 replaces it
+    assert await pool_mock.accounts_refused("SearchTimeline") == []
+
+    await pool_mock.quarantine_refused("user1", "SearchTimeline", utc.ts() - 1)  # a stale marker, lock run out
+    leased = await pool_mock.get_for_queue("SearchTimeline")
+    assert leased is not None and leased.username == "user1"
+    await pool_mock.lock_until("user1", "SearchTimeline", utc.ts() + 7200, keep_refusal=True)
+    assert await pool_mock.accounts_refused("SearchTimeline") == []  # the lease ended the marker
