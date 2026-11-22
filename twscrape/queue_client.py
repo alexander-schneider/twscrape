@@ -458,10 +458,12 @@ class QueueClient:
         if reset_at > 0:
             if global_lock:
                 await self.pool.lock_until(ctx.acc.username, GLOBAL_LOCK_QUEUE, reset_at)
-            # Only the refusal quarantine's own close keeps its marker; any other lock ends it.
-            await self.pool.lock_until(
-                ctx.acc.username, self.queue, reset_at, ctx.req_count, keep_refusal=refusal
-            )
+            if refusal:
+                # The refusal quarantine's own close writes its lock and that value with the marker again (a later
+                # budget floor extends both); any other lock ends the marker (api.adanos.org#3585 round 5).
+                await self.pool.quarantine_refused(username, self.queue, reset_at, ctx.req_count)
+                return
+            await self.pool.lock_until(ctx.acc.username, self.queue, reset_at, ctx.req_count)
             return
 
         await self.pool.unlock(ctx.acc.username, self.queue, ctx.req_count)
@@ -495,13 +497,15 @@ class QueueClient:
         username = self.ctx.acc.username
         refusals = await self.pool.record_refusal(username, self.queue)
         lock_seconds = search_refusal_lock_seconds(refusals)
-        # The lock and the refusal expiry in one write (api.adanos.org#3585 round 2); _close_ctx keeps that lock.
-        await self.pool.quarantine_refused(username, self.queue, utc.ts() + lock_seconds)
+        # The lock and the refusal expiry in one write (api.adanos.org#3585 round 2); _close_ctx writes the same
+        # quarantine again, from the same `until`.
+        until = utc.ts() + lock_seconds
+        await self.pool.quarantine_refused(username, self.queue, until)
         logger.warning(
             f"Search refused for {username} ({reason}, {refusals} in a row); "
             f"no searches with it for {lock_seconds}s"
         )
-        await self._close_ctx(utc.ts() + lock_seconds, refusal=True)
+        await self._close_ctx(until, refusal=True)
         acc = await self.pool.get_for_queue(self.queue)
         if acc is None:
             return False

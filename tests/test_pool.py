@@ -605,3 +605,81 @@ async def test_drain_finishes_a_release_a_second_cancellation_left_running(pool_
 
     lock = (await pool.get("user1")).locks.get("SearchTimeline")
     assert lock is None or (lock - utc.now()).total_seconds() <= 1
+
+
+async def test_drain_waits_for_a_lookup_a_second_cancellation_left_running(pool_mock: AccountsPool, monkeypatch):
+    """api.adanos.org#3585 round 4 P2: a cancel after the lease commit but before the lookup returns, then a second
+    cancel: the release waits for the lookup in a callback that drain() did not know about, so drain() saw nothing
+    pending and the 15-minute lease stayed."""
+    import asyncio
+
+    pool = AccountsPool(pool_mock._db_file, wait_timeout=900, raise_when_no_account=True)
+    await pool.add_account("user1", "p", "e", "ep", cookies="auth_token=t; ct0=c")
+    real_get_and_lock = pool._get_and_lock
+    committed = asyncio.Event()
+
+    async def slow_return(queue, condition):
+        account = await real_get_and_lock(queue, condition)
+        committed.set()
+        await asyncio.sleep(0.2)
+        return account
+
+    monkeypatch.setattr(pool, "_get_and_lock", slow_return)
+    waiter = asyncio.create_task(pool.get_for_queue("SearchTimeline"))
+    await asyncio.wait_for(committed.wait(), 5)
+    waiter.cancel()
+    await asyncio.sleep(0)
+    waiter.cancel()  # the second cancellation, while the lookup still returns
+    await asyncio.gather(waiter, return_exceptions=True)
+
+    await asyncio.wait_for(pool.drain(), 5)
+
+    lock = (await pool.get("user1")).locks.get("SearchTimeline")
+    assert lock is None or (lock - utc.now()).total_seconds() <= 1
+
+
+async def test_a_cancelled_drain_does_not_cancel_the_release_it_waits_for(pool_mock: AccountsPool, monkeypatch):
+    """api.adanos.org#3585 round 4 P2: drain() gathered the pending releases; cancelling drain() cancelled them too
+    and the lease stayed. The releases go on."""
+    import asyncio
+
+    pool = AccountsPool(pool_mock._db_file)
+    await pool.add_account("user1", "p", "e", "ep", cookies="auth_token=t; ct0=c")
+    assert await pool.get_for_queue("SearchTimeline") is not None
+    real_unlock = pool.unlock
+
+    async def slow_unlock(username, queue, req_count=0):
+        await asyncio.sleep(0.2)
+        return await real_unlock(username, queue, req_count)
+
+    release = asyncio.ensure_future(slow_unlock("user1", "SearchTimeline"))
+    pool._pending_releases.add(release)
+    release.add_done_callback(pool._pending_releases.discard)
+    drain = asyncio.create_task(pool.drain())
+    await asyncio.sleep(0.05)
+    drain.cancel()
+    await asyncio.gather(drain, return_exceptions=True)
+
+    await asyncio.sleep(0.4)
+    assert not release.cancelled()
+    lock = (await pool.get("user1")).locks.get("SearchTimeline")
+    assert lock is None or (lock - utc.now()).total_seconds() <= 1
+
+
+async def test_drain_returns_at_its_timeout_with_what_is_still_pending(pool_mock: AccountsPool):
+    """api.adanos.org#3585 round 4 P2: two releases behind a real SQLite writer each retry for a long time, and the
+    drain outlived the worker's 90-second stop grace. drain(timeout) returns in time and says how many are left."""
+    import asyncio
+
+    pool = AccountsPool(pool_mock._db_file)
+    slow = asyncio.ensure_future(asyncio.sleep(5))
+    pool._pending_releases.add(slow)
+    slow.add_done_callback(pool._pending_releases.discard)
+
+    started = asyncio.get_running_loop().time()
+    left = await pool.drain(timeout=0.2)
+
+    assert asyncio.get_running_loop().time() - started < 1
+    assert left == 1
+    assert not slow.cancelled()
+    slow.cancel()

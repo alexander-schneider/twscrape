@@ -50,6 +50,11 @@ REFUSALS_STATS_KEY = "__search_refusals__"
 # The streak above only ends with a search that returns data, so only this tells a refusal quarantine apart from a
 # later ordinary lock (api.adanos.org#3585).
 REFUSED_UNTIL_STATS_KEY = "__search_refused_until__"
+# The lock value the quarantine itself wrote, per queue: {"SearchTimeline": "2026-11-22 11:00:00"}. Only a current
+# lock byte-identical to it is the quarantine's; any other writer (an ordinary lock, a lease, a stale save of an
+# Account, a relogin, raw SQL) breaks the match, and the account no longer counts as refused (api.adanos.org#3585
+# round 5).
+REFUSED_LOCK_STATS_KEY = "__search_refused_lock__"
 
 
 def has_required_cookies(cookies: dict[str, str]) -> bool:
@@ -80,6 +85,8 @@ class AccountsPool:
         self._wait_interval = wait_interval
         # Releases of leases whose caller was cancelled, kept until they ran (api.adanos.org#3585).
         self._pending_releases: set[asyncio.Future] = set()
+        # Account lookups still running, so drain() also waits for a lease a cancelled caller has yet to release.
+        self._pending_lookups: set[asyncio.Future] = set()
         # Read once, so a malformed TWS_ACCOUNT_PACING etc. fails here, not on the first request.
         self.budget = AccountBudget.from_env()
 
@@ -312,7 +319,9 @@ class AccountsPool:
         qs = f"""
         UPDATE accounts SET
             locks = json_object(),
-            stats = json_remove(stats, '$."{REFUSALS_STATS_KEY}"', '$."{REFUSED_UNTIL_STATS_KEY}"')
+            stats = json_remove(
+                stats, '$."{REFUSALS_STATS_KEY}"', '$."{REFUSED_UNTIL_STATS_KEY}"', '$."{REFUSED_LOCK_STATS_KEY}"'
+            )
         """
         await execute(self._db_file, qs)
 
@@ -320,18 +329,22 @@ class AccountsPool:
         qs = "UPDATE accounts SET active = :active WHERE username = :username"
         await execute(self._db_file, qs, {"username": username, "active": active})
 
-    async def lock_until(
-        self, username: str, queue: str, unlock_at: int, req_count=0, keep_refusal: bool = False
-    ):
-        # Any ordinary lock replaces a refusal quarantine, whatever its length: the marker ends with it. Only the
-        # quarantine's own close passes keep_refusal (api.adanos.org#3585 rounds 3 and 4).
-        marker = f'$."{REFUSED_UNTIL_STATS_KEY}"."{queue}"'
-        stats_base = "stats" if keep_refusal else f"json_remove(stats, '{marker}')"
+    @staticmethod
+    def _without_refusal(queue: str) -> str:
+        """The stats without the queue's refusal quarantine (its expiry and its own lock value); the streak stays."""
+        until = f'$."{REFUSED_UNTIL_STATS_KEY}"."{queue}"'
+        lock = f'$."{REFUSED_LOCK_STATS_KEY}"."{queue}"'
+        return f"json_remove(stats, '{until}', '{lock}')"
+
+    async def lock_until(self, username: str, queue: str, unlock_at: int, req_count=0):
+        # Any ordinary lock replaces a refusal quarantine, whatever its length: the marker ends with it, also when
+        # it names the same second. The quarantine's own lock is written by quarantine_refused only
+        # (api.adanos.org#3585 rounds 3 to 5).
         qs = f"""
         UPDATE accounts SET
             locks = json_set(locks, '$.{queue}', datetime({unlock_at}, 'unixepoch')),
             stats = json_set(
-                {stats_base},
+                {self._without_refusal(queue)},
                 '$.{queue}', COALESCE(json_extract(stats, '$.{queue}'), 0) + {req_count}
             ),
             last_used = datetime({utc.ts()}, 'unixepoch')
@@ -341,12 +354,11 @@ class AccountsPool:
 
     async def unlock(self, username: str, queue: str, req_count=0):
         # Lifting the lock ends a refusal quarantine on the queue too (api.adanos.org#3585).
-        marker = f'$."{REFUSED_UNTIL_STATS_KEY}"."{queue}"'
         qs = f"""
         UPDATE accounts SET
             locks = json_remove(locks, '$.{queue}'),
             stats = json_set(
-                json_remove(stats, '{marker}'),
+                {self._without_refusal(queue)},
                 '$.{queue}', COALESCE(json_extract(stats, '$.{queue}'), 0) + {req_count}
             ),
             last_used = datetime({utc.ts()}, 'unixepoch')
@@ -416,13 +428,15 @@ class AccountsPool:
         return int(rs[1])
 
     async def reset_refusals(self, username: str, queue: str) -> None:
-        """Ends the account's refusal streak and refusal expiry on `queue`; writes nothing when there is none."""
+        """Ends the account's refusal streak and quarantine on `queue`; writes nothing when there is none."""
         path = f'$."{REFUSALS_STATS_KEY}"."{queue}"'
         until = f'$."{REFUSED_UNTIL_STATS_KEY}"."{queue}"'
+        lock = f'$."{REFUSED_LOCK_STATS_KEY}"."{queue}"'
         qs = f"""
-        UPDATE accounts SET stats = json_remove(stats, '{path}', '{until}')
+        UPDATE accounts SET stats = json_remove(stats, '{path}', '{until}', '{lock}')
         WHERE username = :username
-            AND (json_extract(stats, '{path}') IS NOT NULL OR json_extract(stats, '{until}') IS NOT NULL)
+            AND (json_extract(stats, '{path}') IS NOT NULL OR json_extract(stats, '{until}') IS NOT NULL
+                OR json_extract(stats, '{lock}') IS NOT NULL)
         """
         await execute(self._db_file, qs, {"username": username})
 
@@ -432,30 +446,38 @@ class AccountsPool:
         qs = f"UPDATE accounts SET stats = json_set(stats, '{path}', :until) WHERE username = :username"
         await execute(self._db_file, qs, {"username": username, "until": int(until)})
 
-    async def quarantine_refused(self, username: str, queue: str, until: int) -> None:
-        """Holds the account on `queue` until `until` because X refused it: the lock and the refusal expiry in one
-        write, so no cancellation leaves one without the other (api.adanos.org#3585 round 2)."""
+    async def quarantine_refused(self, username: str, queue: str, until: int, req_count=0) -> None:
+        """Holds the account on `queue` until `until` because X refused it: the lock, the refusal expiry and the
+        lock value it wrote in one statement, so no cancellation leaves one without the other (api.adanos.org#3585
+        rounds 2 and 5). The quarantine's own close writes through here too, never through lock_until."""
         path = f'$."{REFUSED_UNTIL_STATS_KEY}"."{queue}"'
+        lock = f'$."{REFUSED_LOCK_STATS_KEY}"."{queue}"'
         qs = f"""
         UPDATE accounts SET
             locks = json_set(locks, '$.{queue}', datetime(:until, 'unixepoch')),
-            stats = json_set(stats, '{path}', :until)
+            stats = json_set(
+                stats,
+                '{path}', :until,
+                '{lock}', datetime(:until, 'unixepoch'),
+                '$.{queue}', COALESCE(json_extract(stats, '$.{queue}'), 0) + :req_count
+            )
         WHERE username = :username
         """
-        await execute(self._db_file, qs, {"username": username, "until": int(until)})
+        params = {"username": username, "until": int(until), "req_count": int(req_count)}
+        await execute(self._db_file, qs, params)
 
     async def accounts_refused(self, queue: str) -> list[str]:
-        """Active accounts held on `queue` right now because X refused them: the refusal expiry is ahead AND the
-        lock still holds. A marker whose lock was removed (an operator's unlock, a relogin, a save of an older
-        Account) is no hold (api.adanos.org#3585 round 2), and only the quarantine's own lock counts: one that reaches
-        the expiry (round 3), not a later ordinary one."""
+        """Active accounts held on `queue` right now because X refused them: the refusal expiry is ahead, the lock
+        still holds, and it is byte-identical to the lock the quarantine itself wrote. A removed lock (an operator's
+        unlock, a relogin; api.adanos.org#3585 round 2) or any other lock (an ordinary or later one, a stale save of
+        an Account, raw SQL; rounds 3 to 5) is no refusal: such writers fail closed."""
         path = f'$."{REFUSED_UNTIL_STATS_KEY}"."{queue}"'
+        lock = f'$."{REFUSED_LOCK_STATS_KEY}"."{queue}"'
         qs = f"""
         SELECT username FROM accounts
         WHERE active = true AND COALESCE(json_extract(stats, '{path}'), 0) > :now
             AND datetime(json_extract(locks, '$.{queue}')) > datetime('now')
-            AND datetime(json_extract(locks, '$.{queue}'))
-                >= datetime(json_extract(stats, '{path}'), 'unixepoch')
+            AND json_extract(locks, '$.{queue}') = json_extract(stats, '{lock}')
         ORDER BY username
         """
         rs = await fetchall(self._db_file, qs, {"now": utc.ts()})
@@ -470,7 +492,7 @@ class AccountsPool:
             UPDATE accounts SET
                 locks = json_set(locks, '$.{queue}', datetime('now', '+15 minutes')),
                 -- A new lease ends a refusal marker left on the account (api.adanos.org#3585 round 4).
-                stats = json_remove(stats, '$."{REFUSED_UNTIL_STATS_KEY}"."{queue}"'),
+                stats = {self._without_refusal(queue)},
                 last_used = datetime({utc.ts()}, 'unixepoch')
             WHERE username = {condition}
             RETURNING *
@@ -482,7 +504,7 @@ class AccountsPool:
             UPDATE accounts SET
                 locks = json_set(locks, '$.{queue}', datetime('now', '+15 minutes')),
                 -- A new lease ends a refusal marker left on the account (api.adanos.org#3585 round 4).
-                stats = json_remove(stats, '$."{REFUSED_UNTIL_STATS_KEY}"."{queue}"'),
+                stats = {self._without_refusal(queue)},
                 last_used = datetime({utc.ts()}, 'unixepoch'),
                 _tx = '{tx}'
             WHERE username = {condition}
@@ -498,6 +520,8 @@ class AccountsPool:
         """A free account for `queue`, locked for use, or None. A cancellation of the caller never strands a lease
         the database already committed: the lookup finishes and its account is released (api.adanos.org#3585)."""
         task = asyncio.ensure_future(self._get_for_queue(queue))
+        self._pending_lookups.add(task)
+        task.add_done_callback(self._pending_lookups.discard)
         try:
             return await asyncio.shield(task)
         except asyncio.CancelledError:
@@ -515,14 +539,27 @@ class AccountsPool:
                 await asyncio.shield(release)
             raise
 
-    async def drain(self) -> None:
-        """Waits for the releases and database operations that cancelled callers left running; call it before the
-        event loop closes, e.g. at a worker shutdown (api.adanos.org#3585 round 3)."""
-        from .db import drain_detached
+    async def drain(self, timeout: float | None = None) -> int:
+        """Waits for the account lookups, releases and database operations that cancelled callers left running;
+        call it before the event loop closes, e.g. at a worker shutdown (api.adanos.org#3585 rounds 3 and 4).
 
-        while self._pending_releases:
-            await asyncio.gather(*list(self._pending_releases), return_exceptions=True)
-        await drain_detached()
+        Returns how many are still running: 0 when all finished, more when `timeout` (seconds) ran out first, so a
+        shutdown stays inside its stop grace. Cancelling drain() cancels none of them."""
+        from .db import pending_detached
+
+        loop = asyncio.get_running_loop()
+        deadline = None if timeout is None else loop.time() + timeout
+        while True:
+            pending = self._pending_lookups | self._pending_releases | pending_detached()
+            if not pending:
+                return 0
+            left = None if deadline is None else deadline - loop.time()
+            if left is not None and left <= 0:
+                return len(pending)
+            # asyncio.wait, unlike gather, leaves the tasks running when drain() itself is cancelled.
+            await asyncio.wait(pending, timeout=left)
+            # A finished lookup's done callbacks schedule its release; let them run before looking again.
+            await asyncio.sleep(0)
 
     def _release_abandoned(self, done: "asyncio.Future", queue: str) -> None:
         if done.cancelled() or done.exception() is not None or done.result() is None:

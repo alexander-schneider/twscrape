@@ -1,6 +1,7 @@
 import re
 from collections import OrderedDict
 from contextlib import aclosing
+from datetime import timedelta
 
 import httpx
 import pytest
@@ -1125,7 +1126,7 @@ async def test_a_refusal_marker_without_a_live_lock_is_no_refusal(pool_mock: Acc
     await pool_mock.mark_refused_until("user1", "SearchTimeline", utc.ts() + 600)
     assert await pool_mock.accounts_refused("SearchTimeline") == []
     # Only the quarantine's own lock makes it a hold again (an ordinary lock would end the marker, round 4).
-    await pool_mock.lock_until("user1", "SearchTimeline", utc.ts() + 600, keep_refusal=True)
+    await pool_mock.quarantine_refused("user1", "SearchTimeline", utc.ts() + 600)
     assert await pool_mock.accounts_refused("SearchTimeline") == ["user1"]
 
 
@@ -1156,7 +1157,7 @@ async def test_any_ordinary_lock_or_lease_ends_the_refusal_marker(pool_mock: Acc
     await pool_mock.add_account("user1", "p", "e", "ep", cookies="auth_token=t; ct0=c")
     until = utc.ts() + 1800
     await pool_mock.quarantine_refused("user1", "SearchTimeline", until)
-    await pool_mock.lock_until("user1", "SearchTimeline", until, keep_refusal=True)  # the quarantine's own close
+    await pool_mock.quarantine_refused("user1", "SearchTimeline", until)  # the quarantine's own close
     assert await pool_mock.accounts_refused("SearchTimeline") == ["user1"]
 
     await pool_mock.lock_until("user1", "SearchTimeline", utc.ts() + 3600)  # a 1-hour 429 replaces it
@@ -1165,5 +1166,49 @@ async def test_any_ordinary_lock_or_lease_ends_the_refusal_marker(pool_mock: Acc
     await pool_mock.quarantine_refused("user1", "SearchTimeline", utc.ts() - 1)  # a stale marker, lock run out
     leased = await pool_mock.get_for_queue("SearchTimeline")
     assert leased is not None and leased.username == "user1"
-    await pool_mock.lock_until("user1", "SearchTimeline", utc.ts() + 7200, keep_refusal=True)
+    await pool_mock.lock_until("user1", "SearchTimeline", utc.ts() + 7200)
     assert await pool_mock.accounts_refused("SearchTimeline") == []  # the lease ended the marker
+
+
+async def test_only_a_lock_byte_identical_to_the_quarantines_own_counts(pool_mock: AccountsPool):
+    """api.adanos.org#3585 round 5: relogin() clears the lock but keeps the marker; an older login then finishes
+    and saves its ordinary 1-hour lock over the row (save keeps the reserved stats keys). That lock reached the
+    30-minute expiry and counted as a refusal. Only the lock value the quarantine itself wrote counts now; any
+    other writer (a stale save, a relogin, raw SQL) breaks the match and the account is no longer refused."""
+    from twscrape.db import execute
+
+    await pool_mock.add_account("user1", "p", "e", "ep", cookies="auth_token=t; ct0=c")
+    stale = await pool_mock.get("user1")  # an older login holds this Account
+    await pool_mock.quarantine_refused("user1", "SearchTimeline", utc.ts() + 1800)
+    assert await pool_mock.accounts_refused("SearchTimeline") == ["user1"]
+
+    await execute(pool_mock._db_file, "UPDATE accounts SET locks = json_object() WHERE username = 'user1'")  # relogin
+    assert await pool_mock.accounts_refused("SearchTimeline") == []
+    stale.locks["SearchTimeline"] = utc.now() + timedelta(hours=1)
+    await pool_mock.save(stale)  # the older login finishes: an ordinary 1-hour lock, the marker kept
+    assert await pool_mock.accounts_refused("SearchTimeline") == []
+
+    await pool_mock.quarantine_refused("user1", "SearchTimeline", utc.ts() + 1800)
+    await execute(  # raw SQL rewrites the lock to a later time
+        pool_mock._db_file,
+        "UPDATE accounts SET locks = json_set(locks, '$.SearchTimeline', datetime('now', '+2 hours'))",
+    )
+    assert await pool_mock.accounts_refused("SearchTimeline") == []
+
+
+async def test_the_quarantines_own_close_keeps_it_a_refusal_also_a_second_later(
+    httpx_mock: HTTPXMock, client_fixture: CF, monkeypatch
+):
+    """The close after a refusal rewrites the lock; it must write the quarantine's own value again (also when the
+    clock moved on a second), so the account still counts as refused."""
+    pool, client = client_fixture
+    monkeypatch.setattr("twscrape.queue_client.asyncio.sleep", _mock_sleep)
+    monkeypatch.delenv("TWS_SEARCH_REFUSAL_FIRST_LOCK_SECONDS", raising=False)
+    real_ts = utc.ts
+    ticks = iter(range(1000))
+    monkeypatch.setattr(utc, "ts", lambda: real_ts() + next(ticks))  # every read one second later
+
+    await _refuse_user1(httpx_mock, pool, client)
+    await client._close_ctx()
+
+    assert await pool.accounts_refused("SearchTimeline") == ["user1"]
