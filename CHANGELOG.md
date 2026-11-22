@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.23.6 - 2026-11-22
+
+- A cancelled database operation still commits and closes its connection: every operation, the in-process lock
+  included, runs as a shielded task. Interrupted between its write and the close, a connection stayed open with
+  the write uncommitted, and every other writer hung on "database is locked" for about a minute.
+- `accounts_refused()` counts only the quarantine's own lock (one that reaches the refusal expiry); an ordinary
+  lock shorter than the expiry, or an unlock, ends the marker.
+- `AccountsPool.drain()` waits for the releases and database operations that cancelled callers left running;
+  call it before the event loop closes.
+- A cap that vanishes at UTC midnight between the pool's two reads is retried (at most three times) also when
+  another account is held longer, e.g. quarantined.
+
 ## v0.23.5 - 2026-11-22
 
 - `accounts_refused(queue)` counts an account only while its refusal expiry is ahead AND its lock still holds; a
