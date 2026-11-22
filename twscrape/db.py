@@ -20,6 +20,29 @@ def _no_aiosqlite_debug(record: logging.LogRecord) -> bool:
 logging.getLogger("aiosqlite").addFilter(_no_aiosqlite_debug)
 
 _lock = asyncio.Lock()
+# Database operations whose caller was cancelled, kept until they finished.
+_detached: set[asyncio.Future] = set()
+
+
+async def _run_shielded(func, *args, **kwargs):
+    """One database operation, the in-process lock included, as a task no cancellation interrupts: a cancelled
+    caller gets CancelledError, but the operation still commits and closes its connection. Interrupted between its
+    write and the close, a connection stayed open with the write uncommitted, and every other writer hung on
+    "database is locked" (api.adanos.org CI flake, 2026-11-22)."""
+
+    async def locked():
+        async with _lock:
+            return await func(*args, **kwargs)
+
+    task = asyncio.ensure_future(locked())
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        _detached.add(task)
+        task.add_done_callback(_detached.discard)
+        # Retrieve its outcome when it ends, so an error there is not reported as never retrieved.
+        task.add_done_callback(lambda done: done.cancelled() or done.exception())
+        raise
 
 
 def lock_retry(max_retries=10):
@@ -30,8 +53,7 @@ def lock_retry(max_retries=10):
         async def wrapper(*args, **kwargs):
             for i in range(max_retries):
                 try:
-                    async with _lock:
-                        return await func(*args, **kwargs)
+                    return await _run_shielded(func, *args, **kwargs)
                 except sqlite3.OperationalError as e:
                     if i == max_retries - 1 or "database is locked" not in str(e):
                         raise e
