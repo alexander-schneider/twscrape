@@ -45,6 +45,12 @@ async def _run_shielded(func, *args, **kwargs):
         raise
 
 
+async def drain_detached() -> None:
+    """Waits for the database operations whose callers were cancelled."""
+    while _detached:
+        await asyncio.gather(*list(_detached), return_exceptions=True)
+
+
 def lock_retry(max_retries=10):
     # this lock decorator has double nature:
     # 1. it uses asyncio lock in same process

@@ -321,20 +321,31 @@ class AccountsPool:
         await execute(self._db_file, qs, {"username": username, "active": active})
 
     async def lock_until(self, username: str, queue: str, unlock_at: int, req_count=0):
+        # A lock shorter than the refusal quarantine replaces it: the marker ends with it (api.adanos.org#3585).
+        marker = f'$."{REFUSED_UNTIL_STATS_KEY}"."{queue}"'
         qs = f"""
         UPDATE accounts SET
             locks = json_set(locks, '$.{queue}', datetime({unlock_at}, 'unixepoch')),
-            stats = json_set(stats, '$.{queue}', COALESCE(json_extract(stats, '$.{queue}'), 0) + {req_count}),
+            stats = json_set(
+                CASE WHEN COALESCE(json_extract(stats, '{marker}'), 0) > {int(unlock_at)}
+                    THEN json_remove(stats, '{marker}') ELSE stats END,
+                '$.{queue}', COALESCE(json_extract(stats, '$.{queue}'), 0) + {req_count}
+            ),
             last_used = datetime({utc.ts()}, 'unixepoch')
         WHERE username = :username
         """
         await execute(self._db_file, qs, {"username": username})
 
     async def unlock(self, username: str, queue: str, req_count=0):
+        # Lifting the lock ends a refusal quarantine on the queue too (api.adanos.org#3585).
+        marker = f'$."{REFUSED_UNTIL_STATS_KEY}"."{queue}"'
         qs = f"""
         UPDATE accounts SET
             locks = json_remove(locks, '$.{queue}'),
-            stats = json_set(stats, '$.{queue}', COALESCE(json_extract(stats, '$.{queue}'), 0) + {req_count}),
+            stats = json_set(
+                json_remove(stats, '{marker}'),
+                '$.{queue}', COALESCE(json_extract(stats, '$.{queue}'), 0) + {req_count}
+            ),
             last_used = datetime({utc.ts()}, 'unixepoch')
         WHERE username = :username
         """
@@ -433,12 +444,15 @@ class AccountsPool:
     async def accounts_refused(self, queue: str) -> list[str]:
         """Active accounts held on `queue` right now because X refused them: the refusal expiry is ahead AND the
         lock still holds. A marker whose lock was removed (an operator's unlock, a relogin, a save of an older
-        Account) is no hold (api.adanos.org#3585 round 2)."""
+        Account) is no hold (api.adanos.org#3585 round 2), and only the quarantine's own lock counts: one that reaches
+        the expiry (round 3), not a later ordinary one."""
         path = f'$."{REFUSED_UNTIL_STATS_KEY}"."{queue}"'
         qs = f"""
         SELECT username FROM accounts
         WHERE active = true AND COALESCE(json_extract(stats, '{path}'), 0) > :now
             AND datetime(json_extract(locks, '$.{queue}')) > datetime('now')
+            AND datetime(json_extract(locks, '$.{queue}'))
+                >= datetime(json_extract(stats, '{path}'), 'unixepoch')
         ORDER BY username
         """
         rs = await fetchall(self._db_file, qs, {"now": utc.ts()})
@@ -488,8 +502,20 @@ class AccountsPool:
                 task.add_done_callback(lambda done: self._release_abandoned(done, queue))
                 raise
             if account is not None:
-                await asyncio.shield(self.unlock(account.username, queue))
+                release = asyncio.ensure_future(self.unlock(account.username, queue))
+                self._pending_releases.add(release)
+                release.add_done_callback(self._pending_releases.discard)
+                await asyncio.shield(release)
             raise
+
+    async def drain(self) -> None:
+        """Waits for the releases and database operations that cancelled callers left running; call it before the
+        event loop closes, e.g. at a worker shutdown (api.adanos.org#3585 round 3)."""
+        from .db import drain_detached
+
+        while self._pending_releases:
+            await asyncio.gather(*list(self._pending_releases), return_exceptions=True)
+        await drain_detached()
 
     def _release_abandoned(self, done: "asyncio.Future", queue: str) -> None:
         if done.cancelled() or done.exception() is not None or done.result() is None:
@@ -519,6 +545,7 @@ class AccountsPool:
         loop = asyncio.get_running_loop()
         deadline = None if self._wait_timeout is None else loop.time() + self._wait_timeout
         msg_shown = False
+        vanished_cap_retries = 0
         while True:
             account = await self.get_for_queue(queue)
             if account is not None:
@@ -532,7 +559,6 @@ class AccountsPool:
             nat = await self.next_available_at(queue)
             no_active = not nat
             timed_out = deadline is not None and loop.time() >= deadline
-            timed_out_by_caps = False
             capped_before: list[str] = []
             if deadline is not None and not timed_out:
                 # A cap lock ends with the UTC day: nobody waits for it, also when midnight is near
@@ -541,7 +567,6 @@ class AccountsPool:
                 wait_s = await self.seconds_until_available(queue, exclude=capped)
                 # Every account is held for longer than the wait could last, e.g. quarantined from search, or
                 # only by its cap.
-                timed_out_by_caps = bool(capped) and wait_s is None
                 if (capped and wait_s is None) or (
                     wait_s is not None
                     and wait_s > max(deadline - loop.time(), IN_USE_LOCK_SECONDS + 60)
@@ -556,7 +581,13 @@ class AccountsPool:
             if give_up:
                 if raise_no_account:
                     capped_again = await self.accounts_held_by_cap(queue)
-                    if capped_before and not capped_again and not no_active and timed_out_by_caps:
+                    if (
+                        capped_before
+                        and not capped_again
+                        and not no_active
+                        and vanished_cap_retries < 3
+                    ):
+                        vanished_cap_retries += 1
                         # The caps that ended the wait are gone (a new UTC day began between the two reads): look
                         # again instead of reporting an outage (api.adanos.org#3589).
                         capped_before = []
