@@ -887,3 +887,67 @@ async def test_a_capped_account_does_not_stop_the_wait_for_a_paced_one(tmp_path,
         waiting_pool(pool, wait_timeout=900).get_for_queue_or_wait("SearchTimeline"), 10
     )
     assert account is not None and account.username == "user2"
+
+
+async def test_a_cap_disappearing_at_midnight_between_two_reads_is_retried(tmp_path, monkeypatch):
+    """api.adanos.org#3589: the first read finds the only account capped; at midnight the second read no longer
+    does. That is no NoAccountError (the app took it for an outage): the pool tries again and gets the account."""
+    pool = await make_pool(tmp_path, monkeypatch, accounts=1, TWS_ACCOUNT_DAILY_CAPS="SearchTimeline=400")
+    await pool.lock_until("user1", "SearchTimeline", utc.ts() + 1)  # the cap lock ends at "midnight", 1 s away
+    reads = [["user1"], []]
+    real_held = pool.accounts_held_by_cap
+
+    async def capped_until_midnight(queue):
+        return reads.pop(0) if reads else await real_held(queue)
+
+    real_sleep = asyncio.sleep
+
+    async def short_sleep(*args, **kwargs):
+        await real_sleep(0.3)
+
+    monkeypatch.setattr(pool, "accounts_held_by_cap", capped_until_midnight)
+    waiting = waiting_pool(pool, wait_timeout=900)
+    monkeypatch.setattr(waiting, "accounts_held_by_cap", capped_until_midnight)
+    monkeypatch.setattr("twscrape.accounts_pool.asyncio.sleep", short_sleep)
+
+    account = await asyncio.wait_for(waiting.get_for_queue_or_wait("SearchTimeline"), 10)
+    assert account is not None and account.username == "user1"
+
+
+async def test_a_debit_just_before_midnight_locks_until_the_charged_days_end(
+    httpx_mock: HTTPXMock, tmp_path, monkeypatch
+):
+    """api.adanos.org#3589: the count is charged at 23:59:59 and its call returns after midnight; the cap lock must
+    end at the charged day's midnight, not a day later."""
+    pool = await make_pool(tmp_path, monkeypatch, accounts=1, TWS_ACCOUNT_DAILY_CAPS="SearchTimeline=1")
+    charged = utc.now().replace(hour=23, minute=59, second=59, microsecond=0)
+    clock = {"now": charged}
+
+    class _Clock:
+        @staticmethod
+        def now():
+            return clock["now"]
+
+        @staticmethod
+        def ts():
+            return int(clock["now"].timestamp())
+
+        from_iso = staticmethod(utc.from_iso)
+
+    real_count = pool.count_request
+
+    async def count_then_midnight(*args, **kwargs):
+        result = await real_count(*args, **kwargs)
+        clock["now"] = charged + timedelta(seconds=2)  # the call returned after midnight
+        return result
+
+    monkeypatch.setattr("twscrape.queue_client.utc", _Clock)
+    monkeypatch.setattr(pool, "count_request", count_then_midnight)
+    httpx_mock.add_response(url=URL, json=SEARCH_PAGE)
+    client = QueueClient(pool, "SearchTimeline")
+
+    async with client:
+        await client.get(URL)
+
+    lock = (await pool.get("user1")).locks["SearchTimeline"]
+    assert lock == next_utc_midnight(charged)
