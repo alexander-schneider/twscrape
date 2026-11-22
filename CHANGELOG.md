@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.23.10 - 2026-11-22
+
+- The pacing or cap lock that a refusal quarantine's close sets is written only while the quarantine still owns
+  the lock (`AccountsPool.lock_until_if_quarantined`): a newer lock written meanwhile, such as a 6-hour 429
+  window, is no longer cut back to the pacing floor.
+
 ## v0.23.9 - 2026-11-22
 
 - A refusal quarantine is written once, by `quarantine_refused()`; the close after it writes no refusal. A close
