@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.23.4 - 2026-11-22
+
+- A search refusal quarantine records its own expiry (`__search_refused_until__` in the stats JSON, per queue) and
+  `AccountsPool.accounts_refused(queue)` lists the active accounts it holds right now. The refusal streak ends
+  only with a search that returns data, so an old streak plus a later ordinary lock (a proxy cooldown, an in-use
+  lease) no longer looks like a refusal. A search with data and `reset_locks` end the expiry too.
+- `get_for_queue` is cancellation-safe: when the caller is cancelled while the lease is being taken, the lookup
+  finishes and the account it locked is released, instead of keeping the 15-minute in-use lock nobody holds.
+
 ## v0.23.3 - 2026-11-22
 
 - A pool waits for no account that only its daily cap holds: the wait counts only the other held accounts, so a

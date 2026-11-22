@@ -46,6 +46,10 @@ IN_USE_LOCK_SECONDS = 15 * 60
 # Consecutive refusals per queue, stored in the stats JSON as {"__search_refusals__": {"SearchTimeline": 2}}.
 # The value is an object, so Account.from_rs (integer counters only) and the request counters skip it.
 REFUSALS_STATS_KEY = "__search_refusals__"
+# Until when (unix seconds) the account is held because X refused it, per queue: {"SearchTimeline": 1795563000}.
+# The streak above only ends with a search that returns data, so only this tells a refusal quarantine apart from a
+# later ordinary lock (api.adanos.org#3585).
+REFUSED_UNTIL_STATS_KEY = "__search_refused_until__"
 
 
 def has_required_cookies(cookies: dict[str, str]) -> bool:
@@ -306,7 +310,7 @@ class AccountsPool:
         qs = f"""
         UPDATE accounts SET
             locks = json_object(),
-            stats = json_remove(stats, '$."{REFUSALS_STATS_KEY}"')
+            stats = json_remove(stats, '$."{REFUSALS_STATS_KEY}"', '$."{REFUSED_UNTIL_STATS_KEY}"')
         """
         await execute(self._db_file, qs)
 
@@ -394,13 +398,32 @@ class AccountsPool:
         return int(rs[1])
 
     async def reset_refusals(self, username: str, queue: str) -> None:
-        """Ends the account's refusal streak on `queue`; writes nothing when there is none."""
+        """Ends the account's refusal streak and refusal expiry on `queue`; writes nothing when there is none."""
         path = f'$."{REFUSALS_STATS_KEY}"."{queue}"'
+        until = f'$."{REFUSED_UNTIL_STATS_KEY}"."{queue}"'
         qs = f"""
-        UPDATE accounts SET stats = json_remove(stats, '{path}')
-        WHERE username = :username AND json_extract(stats, '{path}') IS NOT NULL
+        UPDATE accounts SET stats = json_remove(stats, '{path}', '{until}')
+        WHERE username = :username
+            AND (json_extract(stats, '{path}') IS NOT NULL OR json_extract(stats, '{until}') IS NOT NULL)
         """
         await execute(self._db_file, qs, {"username": username})
+
+    async def mark_refused_until(self, username: str, queue: str, until: int) -> None:
+        """Records that the account is held on `queue` until `until` (unix seconds) because X refused it."""
+        path = f'$."{REFUSED_UNTIL_STATS_KEY}"."{queue}"'
+        qs = f"UPDATE accounts SET stats = json_set(stats, '{path}', :until) WHERE username = :username"
+        await execute(self._db_file, qs, {"username": username, "until": int(until)})
+
+    async def accounts_refused(self, queue: str) -> list[str]:
+        """Active accounts held on `queue` right now because X refused them (their refusal expiry is ahead)."""
+        path = f'$."{REFUSED_UNTIL_STATS_KEY}"."{queue}"'
+        qs = f"""
+        SELECT username FROM accounts
+        WHERE active = true AND COALESCE(json_extract(stats, '{path}'), 0) > :now
+        ORDER BY username
+        """
+        rs = await fetchall(self._db_file, qs, {"now": utc.ts()})
+        return [row["username"] for row in rs]
 
     async def _get_and_lock(self, queue: str, condition: str):
         # if space in condition, it's a subquery, otherwise it's username
@@ -432,6 +455,21 @@ class AccountsPool:
         return Account.from_rs(rs) if rs else None
 
     async def get_for_queue(self, queue: str):
+        """A free account for `queue`, locked for use, or None. A cancellation of the caller never strands a lease
+        the database already committed: the lookup finishes and its account is released (api.adanos.org#3585)."""
+        task = asyncio.ensure_future(self._get_for_queue(queue))
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            task.add_done_callback(lambda done: self._release_abandoned(done, queue))
+            raise
+
+    def _release_abandoned(self, done: "asyncio.Future", queue: str) -> None:
+        if done.cancelled() or done.exception() is not None or done.result() is None:
+            return
+        asyncio.ensure_future(self.unlock(done.result().username, queue))
+
+    async def _get_for_queue(self, queue: str):
         q = f"""
         SELECT username FROM accounts
         WHERE active = true AND (
