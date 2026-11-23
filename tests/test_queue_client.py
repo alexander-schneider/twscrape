@@ -127,9 +127,11 @@ async def test_missing_session_cookie_deactivates_and_rotates(
     assert (await pool.get("user1")).active is False
 
 
-async def test_xclid_account_error_keeps_account_active_and_rotates(
+async def test_xclid_account_error_deactivates_account_and_rotates(
     httpx_mock: HTTPXMock, client_fixture: CF, monkeypatch
 ):
+    # X serves the logged-out web app when the session cookies no longer authenticate: retrying the
+    # account every 15 minutes never recovers it, so it is deactivated like a 401 "(32)" answer.
     pool, client = client_fixture
 
     async def fake_get(cls, acc, proxy=None, fresh=False, impersonate=None):
@@ -145,8 +147,13 @@ async def test_xclid_account_error_keeps_account_active_and_rotates(
     assert rep is not None
     assert getattr(rep, "__username") == "user2"
     user1 = await pool.get("user1")
-    assert user1.active is True
-    assert "SearchTimeline" in user1.locks
+    assert user1.active is False
+    assert user1.error_msg == "Logged-out X web app"
+
+    # a deactivated account is never checked out again
+    httpx_mock.add_response(url=URL, json={"foo": "ok"}, status_code=200)
+    rep = await client.get(URL)
+    assert getattr(rep, "__username") == "user2"
 
 
 async def test_xclid_parse_error_aborts_without_changing_account_state(

@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.23.12 - 2026-11-23
+
+- An account that X serves the logged-out web app (`XClIdAccountError`) is marked inactive with that message
+  instead of being locked for 15 minutes and retried forever: its cookies no longer authenticate, and the API
+  answers the same session with 401 "(32) Could not authenticate you", which already deactivates. Re-add or
+  re-login the account to use it again. Port of upstream vladkens/twscrape#385.
+
 ## v0.23.11 - 2026-11-23
 
 - `TWS_DB_EXISTING_ONLY=1`: the pool opens an existing accounts store of the latest migration only. A missing or
