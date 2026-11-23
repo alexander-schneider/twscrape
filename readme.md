@@ -301,6 +301,7 @@ Invalid values raise a `ValueError` naming the variable when the `API` or
 | `TWS_WARMUP_DAYS` | Days over which a new account ramps up from `TWS_WARMUP_START_FRACTION` to the full pacing and caps. Default `0` (off). |
 | `TWS_WARMUP_START_FRACTION` | Share of the budget on an account's first day, in (0, 1]. Default `0.1`. |
 | `TWS_WAIT_EMAIL_CODE` | Email verification timeout in seconds. Default `30`. |
+| `TWS_DB_EXISTING_ONLY` | `1` opens an existing accounts database of the latest migration only and raises `sqlite3.OperationalError` for a missing, empty or older one instead of creating or migrating it. Default `0`. |
 | `TWS_RAISE_WHEN_NO_ACCOUNT` | Raise when no account is available. Accepts `true`/`1` or `false`/`0`. Default `false`. |
 
 X controls rate limits, account challenges, available result windows and response
