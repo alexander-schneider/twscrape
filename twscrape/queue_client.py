@@ -856,8 +856,10 @@ class QueueClient:
                 unknown_retry, transient_api_retry = 0, 0
                 continue
             except XClIdAccountError as e:
+                # X serves the logged-out app when the cookies no longer authenticate: the API answers
+                # 401 "(32) Could not authenticate you" to the same session (upstream vladkens/twscrape#385)
                 logger.warning(f"{e}; username={ctx.acc.username}; queue={self.queue}")
-                await self._close_ctx(utc.ts() + UNKNOWN_API_ERROR_COOLDOWN_SECONDS)
+                await self._close_ctx(inactive=True, msg=str(e))
                 continue
             except XClIdParseError as e:
                 logger.error(f"{e}; username={ctx.acc.username}; queue={self.queue}")
