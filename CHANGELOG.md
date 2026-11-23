@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.23.11 - 2026-11-23
+
+- `TWS_DB_EXISTING_ONLY=1`: the pool opens an existing accounts store of the latest migration only. A missing or
+  empty file, an older migration or a store without the accounts table raises `sqlite3.OperationalError` instead
+  of being created or migrated into a store without accounts. Unset or `0` keeps the old behaviour.
+
 ## v0.23.10 - 2026-11-22
 
 - The pacing or cap lock that a refusal quarantine's close sets is written only while the quarantine still owns

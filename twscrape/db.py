@@ -2,10 +2,12 @@ import asyncio
 import logging
 import random
 import sqlite3
+from pathlib import Path
 
 import aiosqlite
 
 from .logger import logger
+from .utils import get_env_bool
 
 MIN_SQLITE_VERSION = "3.24"
 
@@ -95,7 +97,7 @@ async def check_version():
         pass
 
 
-async def migrate(db: aiosqlite.Connection):
+async def migrate(db: aiosqlite.Connection, existing_only: bool = False):
     async with db.execute("PRAGMA user_version") as cur:
         rs = await cur.fetchone()
         uv = rs[0] if rs else 0
@@ -134,6 +136,18 @@ async def migrate(db: aiosqlite.Connection):
         4: v4,
     }
 
+    if existing_only:
+        async with db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'accounts'"
+        ) as cur:
+            has_accounts = await cur.fetchone() is not None
+        if uv != len(migrations) or not has_accounts:
+            raise sqlite3.OperationalError(
+                f"no accounts store of migration v{len(migrations)} (user_version {uv}); "
+                "TWS_DB_EXISTING_ONLY forbids creating or migrating it"
+            )
+        return
+
     # logger.debug(f"Current migration v{uv} (latest v{len(migrations)})")
     for i in range(uv + 1, len(migrations) + 1):
         logger.info(f"Running migration to v{i}")
@@ -154,9 +168,19 @@ class DB:
 
     async def __aenter__(self):
         await check_version()
-        db = await aiosqlite.connect(self.db_path)
+        existing_only = get_env_bool("TWS_DB_EXISTING_ONLY")
+        if existing_only:
+            # mode=rw opens an existing file only, never creates one.
+            uri = f"{Path(self.db_path).resolve().as_uri()}?mode=rw"
+            db = await aiosqlite.connect(uri, uri=True)
+        else:
+            db = await aiosqlite.connect(self.db_path)
         db.row_factory = aiosqlite.Row
-        await migrate(db)
+        try:
+            await migrate(db, existing_only)
+        except BaseException:
+            await db.close()
+            raise
 
         self.conn = db
         return db
