@@ -699,9 +699,10 @@ async def test_pending_lists_what_drain_waits_for(pool_mock: AccountsPool):
 
 # --- TWS_PREFER_SEARCH_LOCKED_QUEUES ------------------------------------------------------------------------
 # Ways this can fail, covered below: a listed queue still goes to the first free account by name (a new account
-# warming up for search takes thread reads); the preference turns into an exclusion, so a listed queue waits or
-# fails while only search-free accounts are free; it leaks into SearchTimeline or an unlisted queue; mixed lock
-# formats ('YYYY-MM-DD HH:MM:SS' from lock_until, ISO from save) are ordered as text; a bad value is ignored.
+# warming up for search takes thread reads); every thread read lands on the one account disabled last, because
+# disabled accounts are ordered by their exact lock instead of sharing the queue; the preference turns into an
+# exclusion, so a listed queue waits or fails while only search-free accounts are free; it leaks into SearchTimeline
+# or an unlisted queue; a lock in save()'s ISO format is not read as time; a bad value is ignored.
 
 PREFER_ENV = "TWS_PREFER_SEARCH_LOCKED_QUEUES"
 TEN_YEARS = 10 * 365 * 86400
@@ -727,36 +728,48 @@ async def _take_all(pool: AccountsPool, queue: str) -> list[str]:
     return taken
 
 
-async def test_a_listed_queue_takes_the_account_whose_search_lock_ends_latest_first(
+async def test_a_listed_queue_takes_the_longest_held_accounts_first(
     pool_mock: AccountsPool, monkeypatch
 ):
-    """Search-disabled first, then accounts held on search (latest end first), then search-free ones; an account
-    without any search lock comes last. Ties go by username."""
+    """Out of search for years first, then held for hours, then paced for minutes, then free to search; an account
+    without any search lock comes last. Within one order of magnitude the pool's own order (username) decides."""
     pool = await _pool_with_accounts(
         pool_mock._db_file,
         monkeypatch,
         "TweetDetail",
         "a_new",
         "b_new",
-        "y_paced_2h",
-        "x_paced_1h_iso",
+        "x_paced_15m_iso",
+        "y_held_3h",
         "w_searched",
         "z_disabled",
     )
     await pool.lock_until("z_disabled", "SearchTimeline", utc.ts() + TEN_YEARS)
-    await pool.lock_until("y_paced_2h", "SearchTimeline", utc.ts() + 2 * 3600)
-    # ISO with a T: as text it sorts after the 2-hour lock above, as time before it.
-    await _save_search_lock(pool, "x_paced_1h_iso", 3600)
+    await pool.lock_until("y_held_3h", "SearchTimeline", utc.ts() + 3 * 3600)
+    # ISO with a T, as save() writes it: as text it sorts after the 3-hour lock above, as time before it.
+    await _save_search_lock(pool, "x_paced_15m_iso", 900)
     await pool.lock_until("w_searched", "SearchTimeline", utc.ts() - 60)
 
     assert await _take_all(pool, "TweetDetail") == [
         "z_disabled",
-        "y_paced_2h",
-        "x_paced_1h_iso",
+        "y_held_3h",
+        "x_paced_15m_iso",
         "w_searched",
         "a_new",
         "b_new",
     ]
+
+
+async def test_accounts_out_of_search_share_a_listed_queue(pool_mock: AccountsPool, monkeypatch):
+    """Two accounts disabled on different days: the later lock does not take every thread read; both are in the
+    same order of magnitude, so the pool's own order decides (here username, RANDOM() in a pool set so)."""
+    pool = await _pool_with_accounts(
+        pool_mock._db_file, monkeypatch, "TweetDetail", "a_disabled_first", "b_disabled_later"
+    )
+    await pool.lock_until("a_disabled_first", "SearchTimeline", utc.ts() + TEN_YEARS)
+    await pool.lock_until("b_disabled_later", "SearchTimeline", utc.ts() + TEN_YEARS + 86400)
+
+    assert await _take_all(pool, "TweetDetail") == ["a_disabled_first", "b_disabled_later"]
 
 
 async def test_a_listed_queue_falls_back_to_a_search_free_account(

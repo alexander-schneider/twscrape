@@ -63,6 +63,20 @@ REFUSED_UNTIL_STATS_KEY = "__search_refused_until__"
 REFUSED_LOCK_STATS_KEY = "__search_refused_lock__"
 
 
+# TWS_PREFER_SEARCH_LOCKED_QUEUES: how long the account's search lock still holds, as the number of decimal digits
+# of its remaining seconds (9 for a 10-year disable, 5 for hours, 3 for a paced quarter hour), 0 once it ended,
+# -1 without one. Read as time (julianday), since lock_until and save() write different formats. Grouping by
+# magnitude instead of the exact end lets the accounts out of search share a queue in the pool's own order.
+_SEARCH_HOLD_SECONDS = (
+    f"(julianday(json_extract(locks, '$.{SEARCH_QUEUE}')) - julianday('now')) * 86400"
+)
+_SEARCH_HOLD_MAGNITUDE = f"""CASE
+            WHEN json_extract(locks, '$.{SEARCH_QUEUE}') IS NULL THEN -1
+            WHEN {_SEARCH_HOLD_SECONDS} < 1 THEN 0
+            ELSE length(CAST(CAST({_SEARCH_HOLD_SECONDS} AS INTEGER) AS TEXT))
+        END"""
+
+
 def has_required_cookies(cookies: dict[str, str]) -> bool:
     return all(cookies.get(name) for name in ("auth_token", "ct0"))
 
@@ -616,10 +630,7 @@ class AccountsPool:
     async def _get_for_queue(self, queue: str):
         order_by = self._order_by
         if queue in self.budget.prefer_search_locked:
-            # TWS_PREFER_SEARCH_LOCKED_QUEUES: the account whose search lock ends latest first (out of search, then
-            # paced), one without a search lock last. Compared as time, since lock formats differ.
-            search_lock = f"json_extract(locks, '$.{SEARCH_QUEUE}')"
-            order_by = f"{search_lock} IS NULL, datetime({search_lock}) DESC, {order_by}"
+            order_by = f"{_SEARCH_HOLD_MAGNITUDE} DESC, {order_by}"
         q = f"""
         SELECT username FROM accounts
         WHERE active = true AND (
