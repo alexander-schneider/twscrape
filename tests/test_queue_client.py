@@ -1,4 +1,5 @@
 import io
+import json
 import re
 from collections import OrderedDict
 from contextlib import aclosing
@@ -13,6 +14,7 @@ from pytest_httpx import HTTPXMock
 import twscrape.queue_client as queue_client_module
 from twscrape import cli
 from twscrape.accounts_pool import GLOBAL_LOCK_QUEUE, AccountsPool
+from twscrape.db import fetchone
 from twscrape.queue_client import (
     AbortReqError,
     ApiFeatureUpdateRequiredError,
@@ -1494,3 +1496,56 @@ async def test_a_cancelled_close_is_a_pending_release_for_drain(pool_mock: Accou
     assert await pool_mock.drain() == 0
     lock = (await pool_mock.get("user1")).locks.get("SearchTimeline")
     assert lock is None or (lock - utc.now()).total_seconds() <= 1
+
+
+async def test_a_preferred_account_failing_a_listed_queue_rests_so_another_one_reads(
+    httpx_mock: HTTPXMock, tmp_path, monkeypatch
+):
+    """api.adanos.org#3628 R1: with TWS_PREFER_SEARCH_LOCKED_QUEUES=TweetDetail the account disabled for search took
+    every thread read again after it failed one: X answered it 503 24 times and all 8 reads failed, though a
+    healthy account was free. Once its transient retries are spent it rests on that queue only, so the next reads
+    go to the healthy account. Its search lock and its refusal records stay as they were."""
+    monkeypatch.setenv("TWS_PREFER_SEARCH_LOCKED_QUEUES", "TweetDetail")
+    monkeypatch.setattr("twscrape.queue_client.asyncio.sleep", _mock_sleep)
+    pool = AccountsPool(str(tmp_path / "accounts.db"))
+    for name in ("a_healthy", "z_disabled"):
+        await pool.add_account(name, "_", "_", "_", cookies=f"auth_token={name}; ct0=csrf-{name}")
+    await pool.lock_until("z_disabled", "SearchTimeline", utc.ts() + 10 * 365 * 86400)
+    before = await pool.get("z_disabled")
+    stats_before = await _raw_stats(pool, "z_disabled")
+    asked: list[str] = []
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        account = request.headers["cookie"].split("auth_token=")[1].split(";")[0]
+        asked.append(account)
+        if account == "z_disabled":
+            return httpx.Response(503, text="upstream unavailable")
+        return httpx.Response(200, json={"data": {}})
+
+    httpx_mock.add_callback(answer, url=URL, is_reusable=True)
+    read = 0
+    for _ in range(8):
+        try:
+            async with QueueClient(pool, "TweetDetail") as client:
+                await client.get(URL)
+            read += 1
+        except ServiceUnavailableError:
+            pass
+
+    after = await pool.get("z_disabled")
+    assert asked.count("z_disabled") == 3
+    assert read == 7
+    rest = (after.locks["TweetDetail"] - utc.now()).total_seconds()
+    assert 0 < rest <= queue_client_module.TRANSIENT_API_ERROR_COOLDOWN_SECONDS
+    assert after.locks["SearchTimeline"] == before.locks["SearchTimeline"]
+    stats_after = await _raw_stats(pool, "z_disabled")
+    assert {k: v for k, v in stats_after.items() if k != "TweetDetail"} == stats_before
+    assert after.active
+
+
+async def _raw_stats(pool: AccountsPool, username: str) -> dict:
+    rs = await fetchone(
+        pool._db_file, "SELECT stats FROM accounts WHERE username = :u", {"u": username}
+    )
+    assert rs is not None
+    return json.loads(rs["stats"] or "{}")

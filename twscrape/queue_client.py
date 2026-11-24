@@ -851,6 +851,11 @@ class QueueClient:
                 if transient_api_retry >= TRANSIENT_API_ERROR_RETRY_LIMIT:
                     # Every account tried failed, so X failed as a whole: release them.
                     await self._release_held(held)
+                    if self.queue in self.pool.budget.prefer_search_locked:
+                        # A preferred account would take the next request of this queue again: it rests on this
+                        # queue only (no search lock, no refusal), so the next lease goes to another account
+                        # (api.adanos.org#3628 R1).
+                        await self._close_ctx(utc.ts() + TRANSIENT_API_ERROR_COOLDOWN_SECONDS)
                     raise e
                 # X refuses SearchTimeline for some accounts only (vladkens/twscrape#367).
                 # Other operations keep retrying the same account.

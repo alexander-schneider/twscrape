@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.23.15 - 2026-11-24
+
+- `TWS_PREFER_SEARCH_LOCKED_QUEUES`: every account whose `SearchTimeline` lock lies more than 30 days ahead
+  (`SEARCH_DISABLED_AFTER_SECONDS`, the horizon at which api.adanos.org counts an account as disabled for search)
+  shares one top rank, in the pool's own order. By order of magnitude a 3,650-day lock outranked a 31-day one and
+  took every lease of a random pool, and a 29-day lock (still enabled) tied with the 31-day one. Below 30 days the
+  order of magnitude still ranks.
+- A listed queue rests an account whose transient retries (X 5xx, `ServiceUnavailable`) are spent: it is locked on
+  that queue only for `TRANSIENT_API_ERROR_COOLDOWN_SECONDS` (5 minutes), so the next request goes to another
+  account instead of the same preferred one. Before, one failing preferred account failed every thread read while a
+  healthy account was free. No search lock and no refusal record is written; unlisted queues are unchanged.
+
 ## v0.23.14 - 2026-11-24
 
 - `TWS_PREFER_SEARCH_LOCKED_QUEUES="TweetDetail"`: a listed queue goes first to the free accounts held longest

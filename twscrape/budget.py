@@ -9,8 +9,8 @@ from the environment once, when an AccountsPool is created; everything is off wh
 - TWS_WARMUP_DAYS (default 0 = off) and TWS_WARMUP_START_FRACTION (default 0.1): new accounts start at that
   fraction of the budget and reach the full budget after that many days.
 - TWS_PREFER_SEARCH_LOCKED_QUEUES="TweetDetail": those queues go first to the free accounts held longest on
-  SearchTimeline (out of search for years, then hours, then paced minutes), so accounts free to search keep their
-  budget for search. A preference only: a search-free account still takes the queue when no other one is free.
+  SearchTimeline (out of search for more than 30 days, then hours, then paced minutes), so accounts free to search
+  keep their budget for search. A preference only: a search-free account still takes the queue when no other one is free.
 """
 
 import math

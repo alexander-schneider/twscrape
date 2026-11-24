@@ -762,7 +762,7 @@ async def test_a_listed_queue_takes_the_longest_held_accounts_first(
 
 async def test_accounts_out_of_search_share_a_listed_queue(pool_mock: AccountsPool, monkeypatch):
     """Two accounts disabled on different days: the later lock does not take every thread read; both are in the
-    same order of magnitude, so the pool's own order decides (here username, RANDOM() in a pool set so)."""
+    same top rank (beyond 30 days), so the pool's own order decides (here username, RANDOM() in a pool set so)."""
     pool = await _pool_with_accounts(
         pool_mock._db_file, monkeypatch, "TweetDetail", "a_disabled_first", "b_disabled_later"
     )
@@ -814,3 +814,50 @@ async def test_without_the_setting_or_for_other_queues_accounts_go_by_username(
     assert await _take_all(pool, "UserTweets") == ["a_new", "z_disabled"]
     # Search itself is untouched: the disabled account stays out, the free one is taken.
     assert await _take_all(pool, "SearchTimeline") == ["a_new"]
+
+
+DAY = 86400
+
+
+async def test_every_account_disabled_for_search_shares_the_top_rank(
+    pool_mock: AccountsPool, monkeypatch
+):
+    """api.adanos.org#3628 R1: the worker counts a search lock beyond 30 days as disabled, whatever its length. By
+    order of magnitude a 3,650-day lock outranked a 31-day one, and a 29-day lock (still enabled) tied with the
+    31-day one. Every lock beyond 30 days now shares one top rank; below it the magnitudes stay."""
+    pool = await _pool_with_accounts(
+        pool_mock._db_file, monkeypatch, "TweetDetail", "a_29d", "b_31d", "c_3650d"
+    )
+    for name, days in (("a_29d", 29), ("b_31d", 31), ("c_3650d", 3650)):
+        await pool.lock_until(name, "SearchTimeline", utc.ts() + days * DAY)
+
+    assert await _take_all(pool, "TweetDetail") == ["b_31d", "c_3650d", "a_29d"]
+
+
+async def test_disabled_accounts_of_any_lock_length_share_a_random_listed_queue(
+    pool_mock: AccountsPool, monkeypatch
+):
+    """With RANDOM() (the order api.adanos.org's reply client sets) 40 leases spread over both disabled accounts;
+    the 3,650-day one took all 40 before. Once it is inactive, the 31-day one takes them all, not the 29-day one."""
+    pool = await _pool_with_accounts(
+        pool_mock._db_file, monkeypatch, "TweetDetail", "a_29d", "b_31d", "c_3650d"
+    )
+    pool._order_by = "RANDOM()"
+    for name, days in (("a_29d", 29), ("b_31d", 31), ("c_3650d", 3650)):
+        await pool.lock_until(name, "SearchTimeline", utc.ts() + days * DAY)
+
+    async def leases(count: int) -> list[str]:
+        taken = []
+        for _ in range(count):
+            account = await pool.get_for_queue("TweetDetail")
+            assert account is not None
+            taken.append(account.username)
+            await pool.unlock(account.username, "TweetDetail")
+        return taken
+
+    both = await leases(40)
+    await pool.set_active("c_3650d", False)
+    after = await leases(40)
+
+    assert set(both) == {"b_31d", "c_3650d"}
+    assert set(after) == {"b_31d"}
