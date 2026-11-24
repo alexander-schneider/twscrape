@@ -294,17 +294,18 @@ Invalid values raise a `ValueError` naming the variable when the `API` or
 export TWS_PREFER_SEARCH_LOCKED_QUEUES="TweetDetail"  # thread reads go to accounts out of search first
 ```
 
-A listed queue takes the free accounts held longest on `SearchTimeline` first,
-grouped by the order of magnitude of the remaining lock: accounts out of search
-for years (a long refusal quarantine or an operator's lock), then accounts held
-for hours (a cap, a rate limit), then accounts paced for minutes, then accounts
-free to search, and accounts without any search lock last. Within a group the
-pool's own order decides (username, or random for a pool set so), so the
-accounts out of search share the queue instead of the one disabled last taking
-it all. Accounts that are still warming up then spend their requests on search.
-It is a preference only: when no such account is free, an account free to search
-takes the queue at once. `SearchTimeline` itself cannot be listed, and unlisted
-queues keep their order.
+A listed queue takes the free accounts held longest on `SearchTimeline` first:
+every account out of search (a lock more than 30 days ahead, such as a refusal
+quarantine or an operator's lock) shares the top rank, then accounts held for
+hours (a cap, a rate limit), then accounts paced for minutes, then accounts free
+to search, and accounts without any search lock last. Within a rank the pool's
+own order decides (username, or random for a pool set so), so the accounts out
+of search share the queue. Accounts that are still warming up then spend their
+requests on search. It is a preference only: when no such account is free, an
+account free to search takes the queue at once. An account whose transient
+retries on a listed queue are spent (X 5xx) rests on that queue for 5 minutes,
+so the next request goes to another account. `SearchTimeline` itself cannot be
+listed, and unlisted queues keep their order.
 
 ## Environment variables
 
