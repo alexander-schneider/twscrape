@@ -77,6 +77,76 @@ def test_logged_out_x_web_entry_is_account_error():
         list(get_scripts_list(html))
 
 
+XWEB = "https://abs.twimg.com/x-web/x-web"
+LOGGED_IN_ENTRY = f"{XWEB}/entry-client-Ab1x9.js"
+LOGGED_OUT_ENTRY = f"{XWEB}/entry-client-logged-out-Zq7k2.js"
+SIGNING_ENTRY_JS = "let a=t;x=(a[3], 16);y=(a[7], 16);z=(a[1], 16)"
+
+
+def test_logged_out_entry_with_vendor_scripts_and_preloads_is_account_error():
+    # The logged-out app as X serves it: its entry is the page's only executable entry; vendor scripts and
+    # preloads around it do not change that.
+    html = f"""<!doctype html><html><head>
+      <link rel="preload" as="script" crossorigin="anonymous" href="{XWEB}/vendor-Pq3r.js">
+      <link rel="modulepreload" href="{XWEB}/assets/Chunk_9a.js">
+      <script type="module" crossorigin src="{LOGGED_OUT_ENTRY}"></script>
+      <script src="{XWEB}/vendor-Pq3r.js" defer></script>
+    </head><body></body></html>"""
+
+    with pytest.raises(XClIdAccountError, match="Logged-out X web app"):
+        list(get_scripts_list(html))
+
+
+@pytest.mark.parametrize(
+    "reference",
+    [
+        pytest.param(
+            f'<link rel="preload" as="script" crossorigin="anonymous" href="{LOGGED_OUT_ENTRY}">',
+            id="preload",
+        ),
+        pytest.param(f'<link rel="modulepreload" href="{LOGGED_OUT_ENTRY}">', id="modulepreload"),
+        pytest.param(
+            f'<script type="application/json">{{"entry":"{LOGGED_OUT_ENTRY}"}}</script>',
+            id="json-data",
+        ),
+        pytest.param(
+            f'<script type="module" src="{LOGGED_OUT_ENTRY}"></script>', id="mixed-entries"
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_logged_out_bundle_beside_the_logged_in_entry_is_not_an_account_error(reference):
+    # A working signing page that only preloads or mentions the logged-out bundle, or loads both entries,
+    # does not show that the session is logged out: it signs as before (no account is deactivated for it).
+    html = f"""<!doctype html><html><head>
+      {reference}
+      <script type="module" crossorigin src="{LOGGED_IN_ENTRY}"></script>
+    </head><body></body></html>"""
+
+    assert LOGGED_IN_ENTRY in list(get_scripts_list(html))
+
+    requested: list[str] = []
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        requested.append(str(request.url))
+        if str(request.url) == LOGGED_IN_ENTRY:
+            return httpx.Response(200, text=SIGNING_ENTRY_JS)
+        return httpx.Response(200, text="export const unused = 1")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(answer)) as client:
+        assert await parse_anim_idx(html, client) == [3, 7, 1]
+
+
+def test_preload_only_page_is_not_an_account_error():
+    # No executable entry at all: the page is not classified (signing fails or succeeds as before).
+    html = f"""<!doctype html><html><head>
+      <link rel="preload" as="script" crossorigin="anonymous" href="{LOGGED_OUT_ENTRY}">
+      <script src="{XWEB}/vendor-Pq3r.js"></script>
+    </head><body></body></html>"""
+
+    assert LOGGED_OUT_ENTRY in list(get_scripts_list(html))
+
+
 @pytest.mark.asyncio
 async def test_xclid_create_preserves_logged_out_account_error(monkeypatch):
     class FakeResponse:

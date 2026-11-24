@@ -88,6 +88,9 @@ class Account(JSONTrait):
     error_msg: str | None = None
     last_used: datetime | None = None
     _tx: str | None = None
+    # The cookies and headers text as loaded from the store (never stored back): a deactivation for an answer to
+    # this session applies only while the row still holds it (AccountsPool.mark_inactive).
+    loaded_session: tuple[str, str] | None = field(default=None, repr=False, compare=False)
 
     @property
     def has_session(self) -> bool:
@@ -107,6 +110,7 @@ class Account(JSONTrait):
             for k, v in json.loads(doc["stats"]).items()
             if isinstance(v, int) and not is_reserved_stats_key(k)
         }
+        doc["loaded_session"] = (doc["cookies"], doc["headers"])
         doc["headers"] = json.loads(doc["headers"])
         doc["cookies"] = json.loads(doc["cookies"])
         doc["active"] = bool(doc["active"])
@@ -115,6 +119,7 @@ class Account(JSONTrait):
 
     def to_rs(self):
         rs = asdict(self)
+        del rs["loaded_session"]
         rs["locks"] = json.dumps(rs["locks"], default=lambda x: x.isoformat())
         rs["stats"] = json.dumps(rs["stats"])
         rs["headers"] = json.dumps(rs["headers"])

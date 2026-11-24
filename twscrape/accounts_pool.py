@@ -775,25 +775,37 @@ class AccountsPool:
         return None
 
     async def mark_inactive(
-        self, username: str, error_msg: str | None, *, queue: str | None = None, req_count=0
-    ):
-        qs = """
+        self,
+        username: str,
+        error_msg: str | None,
+        *,
+        queue: str | None = None,
+        req_count=0,
+        session: tuple[str, str] | None = None,
+    ) -> bool:
+        """Deactivates the account; returns whether it did. With `session` (the stored cookies and headers text the
+        failing request was sent with, Account.loaded_session) only while the row still holds exactly that text:
+        an answer to an older session never deactivates cookies an operator stored meanwhile. One UPDATE, so the
+        check and the write cannot be split by another writer."""
+        same_session = "AND cookies IS :cookies AND headers IS :headers" if session else ""
+        qs = f"""
         UPDATE accounts SET active = false, error_msg = :error_msg,
             stats = CASE WHEN :queue_path IS NULL THEN stats ELSE
                 json_set(stats, :queue_path, COALESCE(json_extract(stats, :queue_path), 0) + :req_count)
             END
-        WHERE username = :username
+        WHERE username = :username {same_session}
         """
-        await execute(
-            self._db_file,
-            qs,
-            {
-                "username": username,
-                "error_msg": error_msg,
-                "queue_path": f"$.{queue}" if queue is not None else None,
-                "req_count": req_count,
-            },
-        )
+        cookies, headers = session or (None, None)
+        params = {
+            "username": username,
+            "error_msg": error_msg,
+            "queue_path": f"$.{queue}" if queue is not None else None,
+            "req_count": req_count,
+            "cookies": cookies,
+            "headers": headers,
+        }
+        rs = await execute_then_fetchone(self._db_file, qs, "SELECT changes()", params)
+        return bool(rs and rs[0])
 
     async def stats(self):
         def locks_count(queue: str):
