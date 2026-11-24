@@ -8,6 +8,9 @@ from the environment once, when an AccountsPool is created; everything is off wh
 - TWS_ACCOUNT_DAILY_CAPS="SearchTimeline=400": requests per account and queue per UTC day.
 - TWS_WARMUP_DAYS (default 0 = off) and TWS_WARMUP_START_FRACTION (default 0.1): new accounts start at that
   fraction of the budget and reach the full budget after that many days.
+- TWS_PREFER_SEARCH_LOCKED_QUEUES="TweetDetail": those queues go first to the free account whose SearchTimeline
+  lock ends latest (accounts out of search, then paced ones), so accounts free for search keep their budget for
+  search. A preference only: a search-free account still takes the queue when no other one is free.
 """
 
 import math
@@ -24,6 +27,8 @@ PACING_ENV = "TWS_ACCOUNT_PACING"
 DAILY_CAPS_ENV = "TWS_ACCOUNT_DAILY_CAPS"
 WARMUP_DAYS_ENV = "TWS_WARMUP_DAYS"
 WARMUP_START_FRACTION_ENV = "TWS_WARMUP_START_FRACTION"
+PREFER_SEARCH_LOCKED_ENV = "TWS_PREFER_SEARCH_LOCKED_QUEUES"
+SEARCH_QUEUE = "SearchTimeline"
 DEFAULT_WARMUP_START_FRACTION = 0.1
 # Queue names are GraphQL operation names; they end up in JSON paths, so nothing else is accepted.
 _QUEUE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
@@ -65,6 +70,24 @@ def _parse_entries(name: str, raw: str | None, kind: type) -> dict:
     return result
 
 
+def _parse_queue_names(name: str, raw: str | None) -> frozenset[str]:
+    """'Queue,Queue' into {queue}; any malformed or repeated name raises a ValueError naming `name`."""
+    result: set[str] = set()
+    for queue in (part.strip() for part in (raw or "").split(",")):
+        if not queue:
+            continue
+        if not _QUEUE_NAME.fullmatch(queue):
+            raise ValueError(
+                f"{name}: invalid queue {queue!r}; expected Queue,Queue, e.g. TweetDetail"
+            )
+        if queue == SEARCH_QUEUE:
+            raise ValueError(f"{name}: {SEARCH_QUEUE} cannot prefer accounts held on itself")
+        if queue in result:
+            raise ValueError(f"{name}: queue {queue!r} is given twice")
+        result.add(queue)
+    return frozenset(result)
+
+
 def _parse_number(
     name: str, raw: str | None, default: float, low: float, high: float | None
 ) -> float:
@@ -86,6 +109,7 @@ class AccountBudget:
     daily_caps: dict[str, int] = field(default_factory=dict)
     warmup_days: float = 0.0
     warmup_start_fraction: float = DEFAULT_WARMUP_START_FRACTION
+    prefer_search_locked: frozenset[str] = frozenset()
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "AccountBudget":
@@ -104,6 +128,9 @@ class AccountBudget:
             daily_caps=_parse_entries(DAILY_CAPS_ENV, env.get(DAILY_CAPS_ENV), int),
             warmup_days=_parse_number(WARMUP_DAYS_ENV, env.get(WARMUP_DAYS_ENV), 0.0, 0.0, None),
             warmup_start_fraction=fraction,
+            prefer_search_locked=_parse_queue_names(
+                PREFER_SEARCH_LOCKED_ENV, env.get(PREFER_SEARCH_LOCKED_ENV)
+            ),
         )
 
     def applies_to(self, queue: str) -> bool:

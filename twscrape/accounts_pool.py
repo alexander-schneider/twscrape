@@ -9,7 +9,13 @@ from fake_useragent import UserAgent
 from httpx import HTTPStatusError
 
 from .account import Account
-from .budget import DAILY_STATS_KEY, FIRST_USED_STATS_KEY, AccountBudget, utc_day
+from .budget import (
+    DAILY_STATS_KEY,
+    FIRST_USED_STATS_KEY,
+    SEARCH_QUEUE,
+    AccountBudget,
+    utc_day,
+)
 from .db import execute, execute_then_fetchone, fetchall, fetchone
 from .logger import logger
 from .login import LoginConfig, login
@@ -608,6 +614,12 @@ class AccountsPool:
         release.add_done_callback(self._pending_releases.discard)
 
     async def _get_for_queue(self, queue: str):
+        order_by = self._order_by
+        if queue in self.budget.prefer_search_locked:
+            # TWS_PREFER_SEARCH_LOCKED_QUEUES: the account whose search lock ends latest first (out of search, then
+            # paced), one without a search lock last. Compared as time, since lock formats differ.
+            search_lock = f"json_extract(locks, '$.{SEARCH_QUEUE}')"
+            order_by = f"{search_lock} IS NULL, datetime({search_lock}) DESC, {order_by}"
         q = f"""
         SELECT username FROM accounts
         WHERE active = true AND (
@@ -618,7 +630,7 @@ class AccountsPool:
             OR json_extract(locks, '$.{queue}') IS NULL
             OR datetime(json_extract(locks, '$.{queue}')) < datetime('now')
         )
-        ORDER BY {self._order_by}
+        ORDER BY {order_by}
         LIMIT 1
         """
 
