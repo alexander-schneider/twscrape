@@ -1,13 +1,17 @@
+import io
 import re
 from collections import OrderedDict
 from contextlib import aclosing
 from datetime import timedelta
+from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
 from pytest_httpx import HTTPXMock
 
 import twscrape.queue_client as queue_client_module
+from twscrape import cli
 from twscrape.accounts_pool import GLOBAL_LOCK_QUEUE, AccountsPool
 from twscrape.queue_client import (
     AbortReqError,
@@ -154,6 +158,157 @@ async def test_xclid_account_error_deactivates_account_and_rotates(
     httpx_mock.add_response(url=URL, json={"foo": "ok"}, status_code=200)
     rep = await client.get(URL)
     assert getattr(rep, "__username") == "user2"
+
+
+REAL_XCLID_GET = XClIdGenStore.__dict__["get"]  # before the autouse fixture replaces it
+SIGNING_PAGE = Path(__file__).parent / "browser_capture" / "xtid" / "live_page.html"
+XWEB = "https://abs.twimg.com/x-web/x-web"
+LOGGED_IN_ENTRY = f"{XWEB}/entry-client-Ab1x9.js"
+LOGGED_OUT_ENTRY = f"{XWEB}/entry-client-logged-out-Zq7k2.js"
+
+
+def x_web_signing_page(head: str) -> str:
+    """The recorded signing page (verification key, loading animation) as an x-web build: `head` and the logged-in
+    entry replace its legacy chunk map."""
+    page = SIGNING_PAGE.read_text()
+    legacy = re.search(r"<script>t\.u=.*?</script>", page, flags=re.S)
+    assert legacy is not None
+    entry = f'<script type="module" crossorigin src="{LOGGED_IN_ENTRY}"></script>'
+    return page.replace(legacy.group(0), head + entry)
+
+
+@pytest.mark.parametrize(
+    "head",
+    [
+        pytest.param("", id="control"),
+        pytest.param(
+            f'<link rel="preload" as="script" crossorigin="anonymous" href="{LOGGED_OUT_ENTRY}">',
+            id="preload-of-logged-out-bundle",
+        ),
+    ],
+)
+async def test_working_signing_page_keeps_every_account_active(
+    httpx_mock: HTTPXMock, pool_mock: AccountsPool, monkeypatch, head
+):
+    # Three accounts search eight tickers through the real signing path. A preload of the logged-out bundle on the
+    # same working page does not show a logged-out session: no account is deactivated for it.
+    monkeypatch.setattr(XClIdGenStore, "get", REAL_XCLID_GET)
+    monkeypatch.setattr(XClIdGenStore, "items", {})
+    for x in range(1, 4):
+        await pool_mock.add_account(
+            f"user{x}", "_", "_", "_", cookies=f"auth_token=token{x}; ct0=csrf{x}"
+        )
+    httpx_mock.add_response(
+        url="https://x.com/tesla", text=x_web_signing_page(head), is_reusable=True
+    )
+    httpx_mock.add_response(
+        url=LOGGED_IN_ENTRY, text="let a=t;x=(a[3], 16);y=(a[7], 16)", is_reusable=True
+    )
+    # the signer also looks into the preloaded bundle; it holds no signing indices
+    httpx_mock.add_response(
+        url=LOGGED_OUT_ENTRY, text="export const app = 1", is_reusable=True, is_optional=True
+    )
+    httpx_mock.add_response(url=URL, json={"foo": "ok"}, is_reusable=True)
+
+    for _ticker in range(8):
+        async with QueueClient(pool_mock, "SearchTimeline") as client:
+            rep = await client.get(URL)
+            assert rep is not None and rep.json() == {"foo": "ok"}
+
+    accounts = await pool_mock.get_all()
+    assert [(x.username, x.active, x.error_msg) for x in accounts] == [
+        ("user1", True, None),
+        ("user2", True, None),
+        ("user3", True, None),
+    ]
+    searches = [x for x in httpx_mock.get_requests() if str(x.url) == URL]
+    assert len(searches) == 8 and all(x.headers.get("x-client-transaction-id") for x in searches)
+
+
+async def refresh_cookies_with_cli(pool: AccountsPool, monkeypatch, username: str, cookies: str):
+    """`twscrape add_cookie <username>` with the cookies on stdin, as an operator runs it."""
+    monkeypatch.setattr(cli.sys, "stdin", io.StringIO(cookies))
+    await cli.main(
+        SimpleNamespace(
+            command="add_cookie", debug=False, db=str(pool._db_file), username=username
+        )
+    )
+
+
+@pytest.mark.parametrize("refreshed", [True, False], ids=["refreshed-meanwhile", "not-refreshed"])
+async def test_logged_out_answer_to_an_older_session_keeps_a_refreshed_account(
+    httpx_mock: HTTPXMock, client_fixture: CF, monkeypatch, refreshed
+):
+    # The signing request of user1 is in flight when an operator gives the account new cookies. The logged-out
+    # page answers the old session: it must not deactivate the session the operator just stored.
+    pool, client = client_fixture
+    signed_with = []
+
+    async def fake_get(cls, acc, proxy=None, fresh=False, impersonate=None):
+        signed_with.append((acc.username, acc.cookies["auth_token"]))
+        if acc.username == "user1" and len(signed_with) == 1:
+            if refreshed:
+                await refresh_cookies_with_cli(
+                    pool, monkeypatch, "user1", "auth_token=fresh1; ct0=freshcsrf1"
+                )
+            raise XClIdAccountError("Logged-out X web app")
+        return type("Gen", (), {"calc": lambda self, *args: "clid"})()
+
+    monkeypatch.setattr(XClIdGenStore, "get", classmethod(fake_get))
+    httpx_mock.add_response(url=URL, json={"foo": "ok"}, status_code=200)
+
+    rep = await client.get(URL)
+    await client.__aexit__(None, None, None)
+
+    assert rep is not None
+    user1 = await pool.get("user1")
+    if refreshed:
+        # the new session stays active and serves the request
+        assert (user1.active, user1.error_msg) == (True, None)
+        assert user1.cookies == {"auth_token": "fresh1", "ct0": "freshcsrf1"}
+        assert signed_with == [("user1", "token1"), ("user1", "fresh1")]
+        assert getattr(rep, "__username") == "user1"
+        assert "auth_token=fresh1" in httpx_mock.get_requests(url=URL)[0].headers["cookie"]
+        assert "SearchTimeline" not in user1.locks
+    else:
+        assert (user1.active, user1.error_msg) == (False, "Logged-out X web app")
+        assert getattr(rep, "__username") == "user2"
+
+
+@pytest.mark.parametrize("refreshed", [True, False], ids=["refreshed-meanwhile", "not-refreshed"])
+async def test_auth_error_answer_to_an_older_session_keeps_a_refreshed_account(
+    httpx_mock: HTTPXMock, client_fixture: CF, monkeypatch, refreshed
+):
+    # The same for 401 "(32) Could not authenticate you": it answers the session that sent the request.
+    pool, client = client_fixture
+    answers = []
+
+    async def answer(request: httpx.Request) -> httpx.Response:
+        answers.append(request.headers["cookie"])
+        if len(answers) == 1:
+            if refreshed:
+                await refresh_cookies_with_cli(
+                    pool, monkeypatch, "user1", "auth_token=fresh1; ct0=freshcsrf1"
+                )
+            return httpx.Response(
+                401, json={"errors": [{"code": 32, "message": "Could not authenticate you"}]}
+            )
+        return httpx.Response(200, json={"foo": "ok"})
+
+    httpx_mock.add_callback(answer, url=URL, is_reusable=True)
+
+    rep = await client.get(URL)
+    await client.__aexit__(None, None, None)
+
+    assert rep is not None
+    user1 = await pool.get("user1")
+    if refreshed:
+        assert (user1.active, user1.error_msg) == (True, None)
+        assert getattr(rep, "__username") == "user1"
+        assert "auth_token=fresh1" in answers[1]
+    else:
+        assert (user1.active, user1.error_msg) == (False, "(32) Could not authenticate you")
+        assert getattr(rep, "__username") == "user2"
 
 
 async def test_xclid_parse_error_aborts_without_changing_account_state(

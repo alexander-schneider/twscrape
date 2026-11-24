@@ -176,6 +176,26 @@ def _parse_chunk_map_scripts(text: str):
             yield script_url(name, f"{hash_value}a")
 
 
+# The page's application entry: the x-web `entry-client[-...]` module or the responsive-web `main.<hash>` bundle.
+APP_ENTRY_RE = re.compile(r"/(?:entry-client(?:-[\w.-]+)?|main\.[\w]+)\.js(?:[?#].*)?$")
+LOGGED_OUT_ENTRY_RE = re.compile(r"/entry-client-logged-out(?:[-.][\w.-]+)?\.js(?:[?#].*)?$")
+# `type` values a browser runs a `<script src>` with; an absent or empty type is JavaScript too.
+EXECUTABLE_SCRIPT_TYPES = {"", "module", "text/javascript", "application/javascript"}
+
+
+def serves_logged_out_app(text: str) -> bool:
+    """Whether the page runs X's logged-out web app: its executable application entries (`<script src>`) are all
+    the logged-out entry. A preload, a URL in page data or a logged-in entry beside it is inconclusive (False)."""
+    soup = bs4.BeautifulSoup(text, "html.parser")
+    entries = []
+    for tag in soup.select("script[src]"):
+        kind = str(tag.get("type") or "").strip().lower()
+        url = _normalize_asset_url(str(tag.get("src")))
+        if kind in EXECUTABLE_SCRIPT_TYPES and APP_ENTRY_RE.search(url):
+            entries.append(url)
+    return bool(entries) and all(LOGGED_OUT_ENTRY_RE.search(url) for url in entries)
+
+
 def get_scripts_list(text: str):
     marker = 'e=>e+"."+'
     suffix = '[e]+"a.js"'
@@ -195,7 +215,7 @@ def get_scripts_list(text: str):
             seen.add(url)
 
     if urls:
-        if any("/entry-client-logged-out" in url for url in urls):
+        if serves_logged_out_app(text):
             raise XClIdAccountError("Logged-out X web app")
         yield from urls
         return

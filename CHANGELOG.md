@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.23.13 - 2026-11-24
+
+- The logged-out web app is recognised only from the page's executable application entry: every
+  `<script src>` entry (`entry-client-*.js`, `main.*.js`) is `entry-client-logged-out`. A preload or modulepreload
+  of the logged-out bundle, a URL in page data, or a logged-in entry beside it no longer raises
+  `XClIdAccountError`; the page signs as before. In 0.23.12 one preload on a working signing page deactivated every
+  account that loaded it.
+- `AccountsPool.mark_inactive(..., session=(cookies, headers))` deactivates only while the account's stored cookies
+  and headers are still exactly the text the failing request was sent with (one conditional UPDATE; it returns
+  whether it deactivated). The queue client passes the session it loaded (`Account.loaded_session`, not stored), so
+  a logged-out page, a 401 "(32) Could not authenticate you" or another deactivating answer to a request that was
+  in flight while `twscrape add_cookie` (or a login) stored new cookies keeps the refreshed account active and
+  releases it. Without `session` the call deactivates unconditionally, as before.
+
 ## v0.23.12 - 2026-11-23
 
 - An account that X serves the logged-out web app (`XClIdAccountError`) is marked inactive with that message

@@ -449,8 +449,18 @@ class QueueClient:
     ):
         username = ctx.acc.username
         if inactive:
-            await self.pool.mark_inactive(username, msg, queue=self.queue, req_count=ctx.req_count)
-            return
+            deactivated = await self.pool.mark_inactive(
+                username,
+                msg,
+                queue=self.queue,
+                req_count=ctx.req_count,
+                session=ctx.acc.loaded_session,
+            )
+            if deactivated:
+                return
+            # The row holds another session than the one that failed (new cookies stored meanwhile): an ordinary
+            # close releases the account for it.
+            logger.info(f"{msg}; username={username}; queue={self.queue}: session replaced, kept active")
 
         # Pacing (and caps) hold the account at least this long; a longer lock set by the caller wins.
         floor = self._budget_floor(ctx)
