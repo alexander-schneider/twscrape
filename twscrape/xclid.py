@@ -176,24 +176,44 @@ def _parse_chunk_map_scripts(text: str):
             yield script_url(name, f"{hash_value}a")
 
 
-# The page's application entry: the x-web `entry-client[-...]` module or the responsive-web `main.<hash>` bundle.
-APP_ENTRY_RE = re.compile(r"/(?:entry-client(?:-[\w.-]+)?|main\.[\w]+)\.js(?:[?#].*)?$")
-LOGGED_OUT_ENTRY_RE = re.compile(r"/entry-client-logged-out(?:[-.][\w.-]+)?\.js(?:[?#].*)?$")
+# The page's application entry, matched against the file name of the URL path: the x-web `entry-client[-...]` module
+# or the responsive-web `main.<hash>` bundle.
+APP_ENTRY_RE = re.compile(r"(?:entry-client(?:-[\w.-]+)?|main\.\w+)\.js")
+LOGGED_OUT_ENTRY_RE = re.compile(r"entry-client-logged-out(?:[-.][\w.-]+)?\.js")
 # `type` values a browser runs a `<script src>` with; an absent or empty type is JavaScript too.
 EXECUTABLE_SCRIPT_TYPES = {"", "module", "text/javascript", "application/javascript"}
 
 
+def _runs_in_a_modern_browser(tag: bs4.Tag) -> bool:
+    """Whether a modern browser executes this `<script src>`: a script type, not a classic `nomodule` fallback, and
+    not inside an inert `<template>` or a `<noscript>` (text while scripting is on)."""
+    kind = str(tag.get("type") or "").strip().lower()
+    if kind not in EXECUTABLE_SCRIPT_TYPES:
+        return False
+    if kind != "module" and tag.has_attr("nomodule"):
+        return False
+    return tag.find_parent(["template", "noscript"]) is None
+
+
+def _url_file_name(url: str) -> str:
+    """The last segment of the URL's path: a query or fragment never names the script."""
+    return urlparse(_normalize_asset_url(url)).path.rsplit("/", 1)[-1]
+
+
 def serves_logged_out_app(text: str) -> bool:
-    """Whether the page runs X's logged-out web app: its executable application entries (`<script src>`) are all
-    the logged-out entry. A preload, a URL in page data or a logged-in entry beside it is inconclusive (False)."""
+    """Whether the page runs X's logged-out web app: the application entries a modern browser executes
+    (`<script src>`) are all the logged-out entry. A preload, a URL in page data, an inert or fallback script, or a
+    logged-in entry beside it is inconclusive (False)."""
     soup = bs4.BeautifulSoup(text, "html.parser")
     entries = []
-    for tag in soup.select("script[src]"):
-        kind = str(tag.get("type") or "").strip().lower()
-        url = _normalize_asset_url(str(tag.get("src")))
-        if kind in EXECUTABLE_SCRIPT_TYPES and APP_ENTRY_RE.search(url):
-            entries.append(url)
-    return bool(entries) and all(LOGGED_OUT_ENTRY_RE.search(url) for url in entries)
+    # find_all, not a CSS selector: soupsieve releases disagree on whether <template> content matches.
+    for tag in soup.find_all("script", src=True):
+        if not isinstance(tag, bs4.Tag) or not _runs_in_a_modern_browser(tag):
+            continue
+        name = _url_file_name(str(tag.get("src")))
+        if APP_ENTRY_RE.fullmatch(name):
+            entries.append(name)
+    return bool(entries) and all(LOGGED_OUT_ENTRY_RE.fullmatch(name) for name in entries)
 
 
 def get_scripts_list(text: str):

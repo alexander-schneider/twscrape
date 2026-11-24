@@ -168,53 +168,88 @@ LOGGED_OUT_ENTRY = f"{XWEB}/entry-client-logged-out-Zq7k2.js"
 
 
 def x_web_signing_page(head: str) -> str:
-    """The recorded signing page (verification key, loading animation) as an x-web build: `head` and the logged-in
-    entry replace its legacy chunk map."""
+    """The recorded signing page (verification key, loading animation) as an x-web build: `head` (its scripts and
+    preloads) replaces the legacy chunk map."""
     page = SIGNING_PAGE.read_text()
     legacy = re.search(r"<script>t\.u=.*?</script>", page, flags=re.S)
     assert legacy is not None
-    entry = f'<script type="module" crossorigin src="{LOGGED_IN_ENTRY}"></script>'
-    return page.replace(legacy.group(0), head + entry)
+    return page.replace(legacy.group(0), head)
+
+
+ENTRY_SCRIPT = f'<script type="module" crossorigin src="{LOGGED_IN_ENTRY}"></script>'
+GUEST_NAME = "entry-client-logged-out-Ab2.js"
+
+
+async def search_eight_tickers_signing_from(
+    httpx_mock: HTTPXMock, pool: AccountsPool, monkeypatch, head: str
+) -> list[httpx.Response | None]:
+    """Three accounts search eight tickers, each signing with the real signer from the page `head` makes."""
+    monkeypatch.setattr(XClIdGenStore, "get", REAL_XCLID_GET)
+    monkeypatch.setattr(XClIdGenStore, "items", {})
+    for x in range(1, 4):
+        await pool.add_account(
+            f"user{x}", "_", "_", "_", cookies=f"auth_token=token{x}; ct0=csrf{x}"
+        )
+    httpx_mock.add_response(
+        url="https://x.com/tesla", text=x_web_signing_page(head), is_reusable=True
+    )
+    signing_js = "let a=t;x=(a[3], 16);y=(a[7], 16)"
+    httpx_mock.add_response(
+        url=LOGGED_IN_ENTRY, text=signing_js, is_reusable=True, is_optional=True
+    )
+    # the signer may also look into the logged-out bundle; it holds no signing indices
+    httpx_mock.add_response(
+        url=LOGGED_OUT_ENTRY, text="export const app = 1", is_reusable=True, is_optional=True
+    )
+    httpx_mock.add_response(url=URL, json={"foo": "ok"}, is_reusable=True, is_optional=True)
+
+    answers = []
+    for _ticker in range(8):
+        async with QueueClient(pool, "SearchTimeline") as client:
+            answers.append(await client.get(URL))
+    return answers
 
 
 @pytest.mark.parametrize(
     "head",
     [
-        pytest.param("", id="control"),
+        pytest.param(ENTRY_SCRIPT, id="control"),
         pytest.param(
-            f'<link rel="preload" as="script" crossorigin="anonymous" href="{LOGGED_OUT_ENTRY}">',
+            f'<link rel="preload" as="script" crossorigin="anonymous" href="{LOGGED_OUT_ENTRY}">'
+            + ENTRY_SCRIPT,
             id="preload-of-logged-out-bundle",
+        ),
+        # A modern browser runs the module and skips the classic nomodule fallback.
+        pytest.param(
+            f'<script type="module">import "{LOGGED_IN_ENTRY}";</script>'
+            f'<script nomodule src="{LOGGED_OUT_ENTRY}"></script>',
+            id="module-with-nomodule-guest-fallback",
+        ),
+        # A script inside an unused <template> never runs.
+        pytest.param(
+            f'<script type="module">import "{LOGGED_IN_ENTRY}";</script>'
+            f'<template><script type="module" src="{LOGGED_OUT_ENTRY}"></script></template>',
+            id="guest-entry-in-template",
+        ),
+        # Only the file the URL path names is the entry, not a fragment or a query value.
+        pytest.param(
+            f'<script type="module" crossorigin src="{LOGGED_IN_ENTRY}#/{GUEST_NAME}"></script>',
+            id="logged-out-name-in-fragment",
+        ),
+        pytest.param(
+            f'<script type="module" crossorigin src="{LOGGED_IN_ENTRY}?next=/x-web/{GUEST_NAME}"></script>',
+            id="logged-out-name-in-query",
         ),
     ],
 )
 async def test_working_signing_page_keeps_every_account_active(
     httpx_mock: HTTPXMock, pool_mock: AccountsPool, monkeypatch, head
 ):
-    # Three accounts search eight tickers through the real signing path. A preload of the logged-out bundle on the
-    # same working page does not show a logged-out session: no account is deactivated for it.
-    monkeypatch.setattr(XClIdGenStore, "get", REAL_XCLID_GET)
-    monkeypatch.setattr(XClIdGenStore, "items", {})
-    for x in range(1, 4):
-        await pool_mock.add_account(
-            f"user{x}", "_", "_", "_", cookies=f"auth_token=token{x}; ct0=csrf{x}"
-        )
-    httpx_mock.add_response(
-        url="https://x.com/tesla", text=x_web_signing_page(head), is_reusable=True
-    )
-    httpx_mock.add_response(
-        url=LOGGED_IN_ENTRY, text="let a=t;x=(a[3], 16);y=(a[7], 16)", is_reusable=True
-    )
-    # the signer also looks into the preloaded bundle; it holds no signing indices
-    httpx_mock.add_response(
-        url=LOGGED_OUT_ENTRY, text="export const app = 1", is_reusable=True, is_optional=True
-    )
-    httpx_mock.add_response(url=URL, json={"foo": "ok"}, is_reusable=True)
+    # A working signing page that runs the logged-in entry does not show a logged-out session, whatever it says
+    # about the logged-out bundle: no account is deactivated for it.
+    answers = await search_eight_tickers_signing_from(httpx_mock, pool_mock, monkeypatch, head)
 
-    for _ticker in range(8):
-        async with QueueClient(pool_mock, "SearchTimeline") as client:
-            rep = await client.get(URL)
-            assert rep is not None and rep.json() == {"foo": "ok"}
-
+    assert [x.json() if x is not None else None for x in answers] == [{"foo": "ok"}] * 8
     accounts = await pool_mock.get_all()
     assert [(x.username, x.active, x.error_msg) for x in accounts] == [
         ("user1", True, None),
@@ -223,6 +258,24 @@ async def test_working_signing_page_keeps_every_account_active(
     ]
     searches = [x for x in httpx_mock.get_requests() if str(x.url) == URL]
     assert len(searches) == 8 and all(x.headers.get("x-client-transaction-id") for x in searches)
+
+
+async def test_logged_out_entry_on_the_signing_page_deactivates_every_account(
+    httpx_mock: HTTPXMock, pool_mock: AccountsPool, monkeypatch
+):
+    # The logged-out app as X serves it: its entry is the page's only executable entry. Every account that gets it
+    # is deactivated and nothing is searched.
+    head = f'<script type="module" crossorigin src="{LOGGED_OUT_ENTRY}"></script>'
+    answers = await search_eight_tickers_signing_from(httpx_mock, pool_mock, monkeypatch, head)
+
+    assert answers == [None] * 8
+    accounts = await pool_mock.get_all()
+    assert [(x.username, x.active, x.error_msg) for x in accounts] == [
+        ("user1", False, "Logged-out X web app"),
+        ("user2", False, "Logged-out X web app"),
+        ("user3", False, "Logged-out X web app"),
+    ]
+    assert [x for x in httpx_mock.get_requests() if str(x.url) == URL] == []
 
 
 async def refresh_cookies_with_cli(pool: AccountsPool, monkeypatch, username: str, cookies: str):
