@@ -9,7 +9,13 @@ from fake_useragent import UserAgent
 from httpx import HTTPStatusError
 
 from .account import Account
-from .budget import DAILY_STATS_KEY, FIRST_USED_STATS_KEY, AccountBudget, utc_day
+from .budget import (
+    DAILY_STATS_KEY,
+    FIRST_USED_STATS_KEY,
+    SEARCH_QUEUE,
+    AccountBudget,
+    utc_day,
+)
 from .db import execute, execute_then_fetchone, fetchall, fetchone
 from .logger import logger
 from .login import LoginConfig, login
@@ -55,6 +61,20 @@ REFUSED_UNTIL_STATS_KEY = "__search_refused_until__"
 # Account, a relogin, raw SQL) breaks the match, and the account no longer counts as refused (api.adanos.org#3585
 # round 5).
 REFUSED_LOCK_STATS_KEY = "__search_refused_lock__"
+
+
+# TWS_PREFER_SEARCH_LOCKED_QUEUES: how long the account's search lock still holds, as the number of decimal digits
+# of its remaining seconds (9 for a 10-year disable, 5 for hours, 3 for a paced quarter hour), 0 once it ended,
+# -1 without one. Read as time (julianday), since lock_until and save() write different formats. Grouping by
+# magnitude instead of the exact end lets the accounts out of search share a queue in the pool's own order.
+_SEARCH_HOLD_SECONDS = (
+    f"(julianday(json_extract(locks, '$.{SEARCH_QUEUE}')) - julianday('now')) * 86400"
+)
+_SEARCH_HOLD_MAGNITUDE = f"""CASE
+            WHEN json_extract(locks, '$.{SEARCH_QUEUE}') IS NULL THEN -1
+            WHEN {_SEARCH_HOLD_SECONDS} < 1 THEN 0
+            ELSE length(CAST(CAST({_SEARCH_HOLD_SECONDS} AS INTEGER) AS TEXT))
+        END"""
 
 
 def has_required_cookies(cookies: dict[str, str]) -> bool:
@@ -608,6 +628,9 @@ class AccountsPool:
         release.add_done_callback(self._pending_releases.discard)
 
     async def _get_for_queue(self, queue: str):
+        order_by = self._order_by
+        if queue in self.budget.prefer_search_locked:
+            order_by = f"{_SEARCH_HOLD_MAGNITUDE} DESC, {order_by}"
         q = f"""
         SELECT username FROM accounts
         WHERE active = true AND (
@@ -618,7 +641,7 @@ class AccountsPool:
             OR json_extract(locks, '$.{queue}') IS NULL
             OR datetime(json_extract(locks, '$.{queue}')) < datetime('now')
         )
-        ORDER BY {self._order_by}
+        ORDER BY {order_by}
         LIMIT 1
         """
 

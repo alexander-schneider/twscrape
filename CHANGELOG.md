@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.23.14 - 2026-11-24
+
+- `TWS_PREFER_SEARCH_LOCKED_QUEUES="TweetDetail"`: a listed queue goes first to the free accounts held longest
+  on `SearchTimeline`, grouped by the order of magnitude of the remaining lock (out of search for years, then
+  hours, then paced minutes, then free to search; no search lock last). Within a group the pool's own order
+  decides, so the accounts out of search share the queue. Accounts free to search keep their requests for
+  search. A preference only: an account free to search still takes the queue when no other one is free. Unset
+  keeps the pool's order; `SearchTimeline` itself cannot be listed, and a malformed value raises a `ValueError`
+  at pool creation.
+
 ## v0.23.13 - 2026-11-24
 
 - The logged-out web app is recognised only from the application entries a modern browser executes: every

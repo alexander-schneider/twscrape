@@ -288,6 +288,24 @@ account locks it again; the cap ends only with the UTC day. With a budget set,
 Invalid values raise a `ValueError` naming the variable when the `API` or
 `AccountsPool` is created.
 
+### Keeping search accounts for search
+
+```sh
+export TWS_PREFER_SEARCH_LOCKED_QUEUES="TweetDetail"  # thread reads go to accounts out of search first
+```
+
+A listed queue takes the free accounts held longest on `SearchTimeline` first,
+grouped by the order of magnitude of the remaining lock: accounts out of search
+for years (a long refusal quarantine or an operator's lock), then accounts held
+for hours (a cap, a rate limit), then accounts paced for minutes, then accounts
+free to search, and accounts without any search lock last. Within a group the
+pool's own order decides (username, or random for a pool set so), so the
+accounts out of search share the queue instead of the one disabled last taking
+it all. Accounts that are still warming up then spend their requests on search.
+It is a preference only: when no such account is free, an account free to search
+takes the queue at once. `SearchTimeline` itself cannot be listed, and unlisted
+queues keep their order.
+
 ## Environment variables
 
 | Variable | Purpose |
@@ -300,6 +318,7 @@ Invalid values raise a `ValueError` naming the variable when the `API` or
 | `TWS_ACCOUNT_DAILY_CAPS` | Requests per account, queue and UTC day, e.g. `SearchTimeline=400`. At the cap the queue is locked until UTC midnight. Unset: no caps. |
 | `TWS_WARMUP_DAYS` | Days over which a new account ramps up from `TWS_WARMUP_START_FRACTION` to the full pacing and caps. Default `0` (off). |
 | `TWS_WARMUP_START_FRACTION` | Share of the budget on an account's first day, in (0, 1]. Default `0.1`. |
+| `TWS_PREFER_SEARCH_LOCKED_QUEUES` | Comma-separated queues, e.g. `TweetDetail`, that go first to the free accounts held longest on `SearchTimeline` (by order of magnitude of the remaining lock). A preference only. Unset: the pool's own order. |
 | `TWS_WAIT_EMAIL_CODE` | Email verification timeout in seconds. Default `30`. |
 | `TWS_DB_EXISTING_ONLY` | `1` opens an existing accounts database of the latest migration only and raises `sqlite3.OperationalError` for a missing, empty or older one instead of creating or migrating it. Default `0`. |
 | `TWS_RAISE_WHEN_NO_ACCOUNT` | Raise when no account is available. Accepts `true`/`1` or `false`/`0`. Default `false`. |

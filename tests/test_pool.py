@@ -695,3 +695,122 @@ async def test_pending_lists_what_drain_waits_for(pool_mock: AccountsPool):
 
     assert pool_mock.pending() == {slow}
     slow.cancel()
+
+
+# --- TWS_PREFER_SEARCH_LOCKED_QUEUES ------------------------------------------------------------------------
+# Ways this can fail, covered below: a listed queue still goes to the first free account by name (a new account
+# warming up for search takes thread reads); every thread read lands on the one account disabled last, because
+# disabled accounts are ordered by their exact lock instead of sharing the queue; the preference turns into an
+# exclusion, so a listed queue waits or fails while only search-free accounts are free; it leaks into SearchTimeline
+# or an unlisted queue; a lock in save()'s ISO format is not read as time; a bad value is ignored.
+
+PREFER_ENV = "TWS_PREFER_SEARCH_LOCKED_QUEUES"
+TEN_YEARS = 10 * 365 * 86400
+
+
+async def _pool_with_accounts(
+    db_file, monkeypatch, env: str | None, *usernames: str
+) -> AccountsPool:
+    if env is None:
+        monkeypatch.delenv(PREFER_ENV, raising=False)
+    else:
+        monkeypatch.setenv(PREFER_ENV, env)
+    pool = AccountsPool(db_file)
+    for name in usernames:
+        await pool.add_account(name, "p", "e", "ep", cookies="auth_token=t; ct0=c")
+    return pool
+
+
+async def _take_all(pool: AccountsPool, queue: str) -> list[str]:
+    taken = []
+    while (account := await pool.get_for_queue(queue)) is not None:
+        taken.append(account.username)
+    return taken
+
+
+async def test_a_listed_queue_takes_the_longest_held_accounts_first(
+    pool_mock: AccountsPool, monkeypatch
+):
+    """Out of search for years first, then held for hours, then paced for minutes, then free to search; an account
+    without any search lock comes last. Within one order of magnitude the pool's own order (username) decides."""
+    pool = await _pool_with_accounts(
+        pool_mock._db_file,
+        monkeypatch,
+        "TweetDetail",
+        "a_new",
+        "b_new",
+        "x_paced_15m_iso",
+        "y_held_3h",
+        "w_searched",
+        "z_disabled",
+    )
+    await pool.lock_until("z_disabled", "SearchTimeline", utc.ts() + TEN_YEARS)
+    await pool.lock_until("y_held_3h", "SearchTimeline", utc.ts() + 3 * 3600)
+    # ISO with a T, as save() writes it: as text it sorts after the 3-hour lock above, as time before it.
+    await _save_search_lock(pool, "x_paced_15m_iso", 900)
+    await pool.lock_until("w_searched", "SearchTimeline", utc.ts() - 60)
+
+    assert await _take_all(pool, "TweetDetail") == [
+        "z_disabled",
+        "y_held_3h",
+        "x_paced_15m_iso",
+        "w_searched",
+        "a_new",
+        "b_new",
+    ]
+
+
+async def test_accounts_out_of_search_share_a_listed_queue(pool_mock: AccountsPool, monkeypatch):
+    """Two accounts disabled on different days: the later lock does not take every thread read; both are in the
+    same order of magnitude, so the pool's own order decides (here username, RANDOM() in a pool set so)."""
+    pool = await _pool_with_accounts(
+        pool_mock._db_file, monkeypatch, "TweetDetail", "a_disabled_first", "b_disabled_later"
+    )
+    await pool.lock_until("a_disabled_first", "SearchTimeline", utc.ts() + TEN_YEARS)
+    await pool.lock_until("b_disabled_later", "SearchTimeline", utc.ts() + TEN_YEARS + 86400)
+
+    assert await _take_all(pool, "TweetDetail") == ["a_disabled_first", "b_disabled_later"]
+
+
+async def test_a_listed_queue_falls_back_to_a_search_free_account(
+    pool_mock: AccountsPool, monkeypatch
+):
+    """A preference, not an exclusion: with the search-disabled accounts busy, inactive or held, the new one still
+    takes the thread read at once."""
+    pool = await _pool_with_accounts(
+        pool_mock._db_file,
+        monkeypatch,
+        "TweetDetail",
+        "a_new",
+        "x_busy",
+        "y_inactive",
+        "z_global",
+    )
+    for name in ("x_busy", "y_inactive", "z_global"):
+        await pool.lock_until(name, "SearchTimeline", utc.ts() + TEN_YEARS)
+    await pool.lock_until("x_busy", "TweetDetail", utc.ts() + 600)
+    await pool.set_active("y_inactive", False)
+    await pool.lock_until("z_global", GLOBAL_LOCK_QUEUE, utc.ts() + 600)
+
+    account = await pool.get_for_queue("TweetDetail")
+    assert account is not None and account.username == "a_new"
+    await pool.unlock("a_new", "TweetDetail")
+
+    await pool.unlock("x_busy", "TweetDetail")
+    account = await pool.get_for_queue("TweetDetail")
+    assert account is not None and account.username == "x_busy"
+
+
+async def test_without_the_setting_or_for_other_queues_accounts_go_by_username(
+    pool_mock: AccountsPool, monkeypatch
+):
+    pool = await _pool_with_accounts(pool_mock._db_file, monkeypatch, None, "a_new", "z_disabled")
+    await pool.lock_until("z_disabled", "SearchTimeline", utc.ts() + TEN_YEARS)
+    assert await _take_all(pool, "TweetDetail") == ["a_new", "z_disabled"]
+
+    monkeypatch.setenv(PREFER_ENV, "TweetDetail")
+    pool = AccountsPool(pool_mock._db_file)
+    assert pool.budget.prefer_search_locked == frozenset({"TweetDetail"})
+    assert await _take_all(pool, "UserTweets") == ["a_new", "z_disabled"]
+    # Search itself is untouched: the disabled account stays out, the free one is taken.
+    assert await _take_all(pool, "SearchTimeline") == ["a_new"]

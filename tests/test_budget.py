@@ -40,6 +40,7 @@ BUDGET_ENV = (
     "TWS_ACCOUNT_DAILY_CAPS",
     "TWS_WARMUP_DAYS",
     "TWS_WARMUP_START_FRACTION",
+    "TWS_PREFER_SEARCH_LOCKED_QUEUES",
 )
 
 
@@ -54,6 +55,7 @@ def test_unset_config_is_off():
     assert budget.pacing == {} and budget.daily_caps == {}
     assert budget.warmup_days == 0 and budget.warmup_start_fraction == 0.1
     assert not budget.applies_to("SearchTimeline")
+    assert budget.prefer_search_locked == frozenset()
 
 
 def test_env_strings_are_parsed():
@@ -63,6 +65,7 @@ def test_env_strings_are_parsed():
             "TWS_ACCOUNT_DAILY_CAPS": "SearchTimeline=400",
             "TWS_WARMUP_DAYS": "14",
             "TWS_WARMUP_START_FRACTION": "0.25",
+            "TWS_PREFER_SEARCH_LOCKED_QUEUES": " TweetDetail, UserTweets ,",
         }
     )
     assert budget.pacing == {"SearchTimeline": 60.0, "UserTweets": 15.5}
@@ -70,6 +73,7 @@ def test_env_strings_are_parsed():
     assert (budget.warmup_days, budget.warmup_start_fraction) == (14.0, 0.25)
     assert budget.applies_to("SearchTimeline") and budget.applies_to("UserTweets")
     assert not budget.applies_to("TweetDetail")
+    assert budget.prefer_search_locked == frozenset({"TweetDetail", "UserTweets"})
 
 
 @pytest.mark.parametrize(
@@ -92,6 +96,11 @@ def test_env_strings_are_parsed():
         ("TWS_WARMUP_START_FRACTION", "0"),
         ("TWS_WARMUP_START_FRACTION", "1.5"),
         ("TWS_WARMUP_START_FRACTION", "x"),
+        ("TWS_PREFER_SEARCH_LOCKED_QUEUES", "Tweet Detail"),
+        ("TWS_PREFER_SEARCH_LOCKED_QUEUES", "TweetDetail=1"),
+        ("TWS_PREFER_SEARCH_LOCKED_QUEUES", "Tweet'Detail"),
+        ("TWS_PREFER_SEARCH_LOCKED_QUEUES", "TweetDetail,TweetDetail"),
+        ("TWS_PREFER_SEARCH_LOCKED_QUEUES", "SearchTimeline"),
     ],
 )
 def test_invalid_entries_raise_a_clear_error_at_pool_and_api_creation(
