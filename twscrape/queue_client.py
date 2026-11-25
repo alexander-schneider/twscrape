@@ -34,6 +34,13 @@ CONTROL_SCREEN_NAME = "X"
 SIGNING_FAILURE_COOLDOWN_SECONDS = 30 * 60
 DEFAULT_SEARCH_REFUSAL_FIRST_LOCK_SECONDS = 30 * 60
 DEFAULT_SEARCH_REFUSAL_LOCK_SECONDS = 6 * 60 * 60
+# The errors of an HTTP 200 search answer that refuse the account, and whether a signed control read must confirm the
+# refusal. A broken signature also gets "(-1) Internal server error"; the closed suspended-user gate of the Latest tab
+# names the account's state itself. Other closed gates may hold for every account and stay unknown errors.
+SEARCH_REFUSALS = {
+    "(-1) Internal server error": True,
+    "ProductDisabled: Closed gate stopped execution of the pipeline (LatestTabSrpDenySuspendedUsers)": False,
+}
 
 
 def _env_seconds(name: str, default: int) -> int:
@@ -587,8 +594,8 @@ class QueueClient:
             return False
 
     @staticmethod
-    def _is_search_refusal(err_msg: str) -> bool:
-        return "(-1) Internal server error" in err_msg
+    def _search_refusal(err_msg: str) -> str | None:
+        return next((refusal for refusal in SEARCH_REFUSALS if refusal in err_msg), None)
 
     async def _check_rep(self, rep: Response) -> None:
         """
@@ -754,7 +761,7 @@ class QueueClient:
             if (
                 self.queue == SEARCH_QUEUE
                 and rep.status_code == 200
-                and self._is_search_refusal(err_msg)
+                and self._search_refusal(err_msg)
             ):
                 raise SearchRefusedError(
                     f"Transient X API error ({rep.status_code}) for {self.queue}: {err_msg}"
@@ -835,10 +842,11 @@ class QueueClient:
                 ):
                     raise SearchRefusedError(f"X refused {self.queue} with HTTP 404: {e}") from e
             except SearchRefusedError as e:
-                if not await self._search_limit_confirmed("(-1) Internal server error"):
+                reason = self._search_refusal(str(e)) or "(-1) Internal server error"
+                if SEARCH_REFUSALS[reason] and not await self._search_limit_confirmed(reason):
                     raise ServiceUnavailableError(str(e)) from e
                 refused += 1
-                if not await self._quarantine_refused_search("(-1) Internal server error") or (
+                if not await self._quarantine_refused_search(reason) or (
                     refused >= TRANSIENT_API_ERROR_RETRY_LIMIT
                 ):
                     raise

@@ -145,7 +145,10 @@ A refused search is an HTTP 200 SearchTimeline answer with `(-1) Internal server
 error` and no timeline data, or HTTP 404 after three fresh
 x-client-transaction-ids (one on a paced queue, see below). Before it counts, one signed control read
 (UserByScreenName `X`) must return user data (`data.user.result.rest_id`). Then
-the account is locked for search: 30 minutes for its first refusal, doubled for
+the account is locked for search. An HTTP 200 SearchTimeline answer whose error is
+X's closed suspended-user gate (`ProductDisabled: Closed gate stopped execution of the
+pipeline (LatestTabSrpDenySuspendedUsers)`) names the account's state itself: it is a
+refusal without the control read. Other closed gates stay unknown errors. The lock lasts 30 minutes for its first refusal, doubled for
 each consecutive refusal up to 6 hours (see the `TWS_SEARCH_REFUSAL_*` variables).
 The count of consecutive refusals is stored per account in `accounts.db`. It
 survives saving the account (for example after a login) and goes back to 0 when
