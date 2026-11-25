@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.23.16 - 2026-11-25
+
+- An HTTP 200 `SearchTimeline` answer with X's closed suspended-user gate (`(-1) InvalidArgument: ProductDisabled:
+  Closed gate stopped execution of the pipeline (LatestTabSrpDenySuspendedUsers)`) is a search refusal: the account
+  gets the refusal quarantine (`TWS_SEARCH_REFUSAL_*`) and the request moves to a free account, or raises
+  `SearchRefusedError` without one. X names the account's state, so no signed control read confirms it. Before,
+  it was an unknown API error: a 15-minute hold, then the same account took the next search and failed it again.
+  Other closed gates keep the unknown-error path, since they may hold for every account.
+
 ## v0.23.15 - 2026-11-24
 
 - `TWS_PREFER_SEARCH_LOCKED_QUEUES`: every account whose `SearchTimeline` lock lies more than 30 days ahead
