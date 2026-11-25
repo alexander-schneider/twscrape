@@ -973,6 +973,77 @@ async def test_search_refused_for_every_account_stops_without_retrying_them(
     assert issubclass(SearchRefusedError, ServiceUnavailableError)
 
 
+# X's answer to a search by an account it treats as suspended for the Latest tab (2026-11-25).
+SUSPENDED_GATE = {
+    "errors": [
+        {
+            "code": -1,
+            "message": "InvalidArgument: ProductDisabled: Closed gate stopped execution of the pipeline "
+            "(LatestTabSrpDenySuspendedUsers)",
+        }
+    ]
+}
+
+
+async def test_closed_suspended_user_gate_quarantines_the_account_and_moves_on(
+    httpx_mock: HTTPXMock, client_fixture: CF, monkeypatch
+):
+    """X names the refusal itself, so no control read confirms it: the account gets the refusal quarantine and the
+    request goes on with the next account, instead of a 15-minute unknown-error hold that hands the same account the
+    next search."""
+    pool, client = client_fixture
+    monkeypatch.setattr("twscrape.queue_client.asyncio.sleep", _mock_sleep)
+    await client.__aenter__()
+
+    httpx_mock.add_response(url=URL, json=SUSPENDED_GATE, status_code=200)
+    httpx_mock.add_response(url=URL, json={"foo": "ok"}, status_code=200)
+
+    rep = await client.get(URL)
+
+    assert rep is not None and getattr(rep, "__username", None) == "user2"
+    assert [r.headers["x-csrf-token"] for r in httpx_mock.get_requests()] == ["csrf1", "csrf2"]
+    locks = await _search_lock_hours(pool)
+    assert locks["user1"] == 0.5
+    assert locks["user2"] <= 0.25
+
+
+async def test_closed_suspended_user_gate_for_every_account_raises_a_refusal(
+    httpx_mock: HTTPXMock, client_fixture: CF, monkeypatch
+):
+    pool, client = client_fixture
+    monkeypatch.setattr("twscrape.queue_client.asyncio.sleep", _mock_sleep)
+    await client.__aenter__()
+
+    for _ in range(2):
+        httpx_mock.add_response(url=URL, json=SUSPENDED_GATE, status_code=200)
+
+    with pytest.raises(SearchRefusedError, match="LatestTabSrpDenySuspendedUsers"):
+        await client.get(URL)
+
+    assert [r.headers["x-csrf-token"] for r in httpx_mock.get_requests()] == ["csrf1", "csrf2"]
+    assert await _search_lock_hours(pool) == {"user1": 0.5, "user2": 0.5}
+
+
+async def test_another_closed_gate_stays_an_unknown_error(
+    httpx_mock: HTTPXMock, client_fixture: CF, monkeypatch
+):
+    """Only the suspended-user gate names the account. Another closed gate may hold for every account, so it keeps
+    the 15-minute unknown-error hold instead of a quarantine of each account."""
+    pool, client = client_fixture
+    monkeypatch.setattr("twscrape.queue_client.asyncio.sleep", _mock_sleep)
+    await client.__aenter__()
+
+    message = "InvalidArgument: ProductDisabled: Closed gate stopped execution of the pipeline (LatestTabSrpOff)"
+    httpx_mock.add_response(url=URL, json={"errors": [{"code": -1, "message": message}]}, status_code=200)
+
+    with pytest.raises(UnexpectedApiError, match="LatestTabSrpOff") as exc_info:
+        await client.get(URL)
+
+    assert not isinstance(exc_info.value, ServiceUnavailableError)
+    assert await _search_lock_hours(pool) == {"user1": 0.2}
+    assert await pool.record_refusal("user1", "SearchTimeline") == 1
+
+
 async def test_search_404_after_fresh_signing_is_a_refusal(
     httpx_mock: HTTPXMock, client_fixture: CF, monkeypatch
 ):
